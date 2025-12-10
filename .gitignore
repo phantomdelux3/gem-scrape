@@ -1,0 +1,68 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage
+*.lcov
+
+# Build / dist
+dist
+build
+.tmp
+.temp
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Package managers
+.package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# TypeScript
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+.eslintcache
+
+# Environment variables
+.env
+.env.*.local
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Tests outputs
+.nyc_output
+test-results/
+junit-report.xml
+
+# Logs / database / misc
+*.sqlite
+*.sqlite3
+*.db
+
+# Ignore all contents of pdfs folder but keep folder
+pdfs/*
+!pdfs/.gitkeep
+
+# Ignore all contents of data_exports folder but keep folder
+data_exports/*
+!data_exports/.gitkeep
