@@ -5,8 +5,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "pyinit": "python -m venv venv && venv\\Scripts\\pip install -r requirements.txt"
+    "start": "venv\\Scripts\\activate && node index.js",
+    "pyinit": "py -3.11 -m venv venv && venv\\Scripts\\pip install -r requirements.txt"
   },
   "dependencies": {
     "axios": "^1.6.2",
