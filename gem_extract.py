@@ -16,6 +16,7 @@ from collections import defaultdict
 import difflib
 import pdfplumber
 import pandas as pd
+from tqdm import tqdm
 
 # ---------- CONFIG ----------
 PDF_DIR = Path("pdfs")
@@ -708,16 +709,17 @@ def extract_dict_from_tables(pdf_path: Path) -> dict:
 # ---------- per-pdf processing ----------
 
 def process_pdf(pdf_path: Path, debug_first: bool = False):
-    print(f'\n=== Processing {pdf_path.name} ===')
+    # print(f'\n=== Processing {pdf_path.name} ===')
     raw_text = extract_text_from_pdf(pdf_path)
     if not raw_text.strip():
-        print('  WARNING: no text extracted by pdfplumber')
+        # tqdm.write('  WARNING: no text extracted by pdfplumber')
+        pass
     text = normalize_text_preserve_lines(raw_text)
     text = preprocess_text(text)
     if debug_first:
         dbg = pdf_path.with_suffix('.normalized.txt')
         dbg.write_text(text, encoding='utf-8')
-        print('  [DEBUG] normalized text written to', dbg)
+        tqdm.write(f'  [DEBUG] normalized text written to {dbg}')
     contract_no = pdf_path.stem
     contract_date = extract_contract_date(text)
     row = {'ContractNo': contract_no, 'GeneratedDate': contract_date}
@@ -747,7 +749,7 @@ def process_pdf(pdf_path: Path, debug_first: bool = False):
         total = sanitize_double_digits(total)
         row['TotalOrderValueINR'] = total
     items = parse_items(text, contract_no)
-    print(f"  Fields extracted (Org+Buyer+Paying+Seller): {len(kv)}, Items: {len(items)}")
+    # print(f"  Fields extracted (Org+Buyer+Paying+Seller): {len(kv)}, Items: {len(items)}")
     return row, items
 
 # ---------- Main entry + Excel writing ----------
@@ -766,13 +768,22 @@ def main():
 
     contracts = []
     items = []
-    for idx, pdf in enumerate(pdf_files):
+    
+    # Use tqdm for progress bar
+    print(f'Starting extraction for {len(pdf_files)} files...')
+    pbar = tqdm(pdf_files, unit="file")
+    for idx, pdf in enumerate(pbar):
+        pbar.set_description(f"Extracting {pdf.name[:30]}")
         try:
-            row, item_rows = process_pdf(pdf, debug_first=(idx == 0))
+            # Only debug first file if test mode is not on, or just first file generally
+            debug_mode = (idx == 0)
+            row, item_rows = process_pdf(pdf, debug_first=debug_mode)
             contracts.append(row)
             items.extend(item_rows)
         except Exception as e:
-            print('ERROR processing', pdf, ':', e)
+            tqdm.write(f'ERROR processing {pdf.name}: {e}')
+
+
 
     df_contracts = pd.DataFrame(contracts)
     df_items = pd.DataFrame(items)

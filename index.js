@@ -93,9 +93,22 @@ async function mainMenu() {
             try {
                 // Try using venv python, fallback to system python
                 const pythonCmd = await fs.pathExists('venv/Scripts/python.exe') ? 'venv\\Scripts\\python.exe' : 'python';
-                const { stdout, stderr } = await execAsync(`${pythonCmd} gem_extract.py`);
-                console.log(stdout);
-                if (stderr) console.error('Extraction Errors:', stderr);
+
+                // Use spawn with stdio: 'inherit' to show progress bar in real-time
+                const { spawn } = await import('child_process');
+
+                await new Promise((resolve, reject) => {
+                    const pyProcess = spawn(pythonCmd, ['gem_extract.py'], { stdio: 'inherit' });
+
+                    pyProcess.on('close', (code) => {
+                        if (code === 0) resolve();
+                        else reject(new Error(`Extraction process exited with code ${code}`));
+                    });
+
+                    pyProcess.on('error', (err) => {
+                        reject(err);
+                    });
+                });
             } catch (error) {
                 console.error('Failed to run extraction script:', error.message);
             }
