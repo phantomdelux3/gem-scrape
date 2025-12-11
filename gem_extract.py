@@ -22,6 +22,10 @@ PDF_DIR = Path("pdfs")
 DATA_EXPORTS_DIR = Path("data_exports")
 OUTPUT_XLSX = DATA_EXPORTS_DIR / "gem_contracts.xlsx"
 
+# Toggle specific extraction blocks
+INCLUDE_ORG_DETAILS = False
+INCLUDE_PAYING_DETAILS = False
+
 # Heuristics for sanitizing numbers
 MAX_REASONABLE_LEN = 10   # prefer numeric candidates with <= this many digits
 TAIL_DIGITS = 5           # if digits are too long, keep last TAIL_DIGITS digits
@@ -654,11 +658,21 @@ def extract_dict_from_tables(pdf_path: Path) -> dict:
                                         data['Seller_ContactNo'] = ", ".join(final_contacts)
 
                             # --- BUYER DETAILS BLOCK ---
-                            if 'details' in norm_lower and 'buyer' in norm_lower:
-                                # Parse using BUYER_FIELDS
+                            elif 'details' in norm_lower and 'buyer' in norm_lower:
                                 block_data = parse_kv_block(norm_text, BUYER_FIELDS)
                                 data.update(block_data)
-                                
+
+                            # --- PAYING DETAILS BLOCK ---
+                            elif 'paying' in norm_lower and ('authority' in norm_lower or 'detail' in norm_lower):
+                                if INCLUDE_PAYING_DETAILS:
+                                    block_data = parse_kv_block(norm_text, PAYING_FIELDS)
+                                    data.update(block_data)
+
+                            # --- ORG DETAILS BLOCK ---
+                            elif 'organisation' in norm_lower and 'details' in norm_lower:
+                                if INCLUDE_ORG_DETAILS:
+                                    block_data = parse_kv_block(norm_text, ORG_FIELDS)
+                                    data.update(block_data)
                         # Check row for Total Order Value
                         # For TOV, we can flatten to single line for search
                         row_flat = [str(c).replace('\n', ' ').strip() if c else '' for c in row]
@@ -766,13 +780,17 @@ def main():
     # Ensure required columns exist and in correct order
     required_contract_cols = [
         'ContractNo','GeneratedDate',
-        'Org_Type','Org_Ministry','Org_Department','Org_OrganisationName','Org_OfficeZone',
         'Buyer_Designation','Buyer_ContactNo','Buyer_EmailID','Buyer_GSTIN','Buyer_Address',
-        'Paying_Role','Paying_PaymentMode','Paying_Designation','Paying_EmailID','Paying_GSTIN','Paying_Address',
         'Seller_GeMSellerID','Seller_CompanyName','Seller_ContactNo','Seller_EmailID','Seller_Address',
         'Seller_MSMERegistrationNumber','Seller_MSESocialCategory','Seller_MSEGender','Seller_GSTIN',
         'TotalOrderValueINR'
     ]
+
+    if INCLUDE_ORG_DETAILS:
+        required_contract_cols.extend(['Org_Type','Org_Ministry','Org_Department','Org_OrganisationName','Org_OfficeZone'])
+
+    if INCLUDE_PAYING_DETAILS:
+        required_contract_cols.extend(['Paying_Role','Paying_PaymentMode','Paying_Designation','Paying_EmailID','Paying_GSTIN','Paying_Address'])
     for c in required_contract_cols:
         if c not in df_contracts.columns:
             df_contracts[c] = pd.NA

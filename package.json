@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "init": "python -m venv venv && venv\\Scripts\\pip install -r requirements.txt"
+    "pyinit": "python -m venv venv && venv\\Scripts\\pip install -r requirements.txt"
   },
   "dependencies": {
     "axios": "^1.6.2",
