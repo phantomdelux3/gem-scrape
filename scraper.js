@@ -4,7 +4,10 @@ import inquirer from 'inquirer';
 import fs from 'fs-extra';
 import path from 'path';
 import qs from 'qs';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { SingleBar, Presets } from 'cli-progress';
+const execAsync = promisify(exec);
 
 // Helper for delay
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -242,6 +245,18 @@ export async function runScraper(answers) {
     }
 
     progressBar.stop();
+    console.log('\nScraping completed. Starting data extraction...');
+
+    try {
+        // Try using venv python, fallback to system python
+        const pythonCmd = await fs.pathExists('venv/Scripts/python.exe') ? 'venv\\Scripts\\python.exe' : 'python';
+        const { stdout, stderr } = await execAsync(`${pythonCmd} gem_extract.py`);
+        console.log(stdout);
+        if (stderr) console.error('Extraction Errors:', stderr);
+    } catch (error) {
+        console.error('Failed to run extraction script:', error.message);
+    }
+
     console.log('\nAll done!');
     console.log('Stats:', stats);
 }

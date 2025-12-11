@@ -66,3 +66,9 @@ pdfs/*
 # Ignore all contents of data_exports folder but keep folder
 data_exports/*
 !data_exports/.gitkeep
+
+/venv/
+venv/
+/venv
+
+__pycache__

@@ -3,6 +3,10 @@ import { processAllPdfs } from './extractor.js';
 import { runScraper } from './scraper.js';
 import { showStats, searchContracts } from './manager.js';
 import fs from 'fs-extra';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // --- SCRAPER FUNCTION ---
 async function startScraper() {
@@ -74,7 +78,7 @@ async function mainMenu() {
             message: 'Select Action:',
             choices: [
                 { name: '1. Scrape Contracts', value: 'scrape' },
-                { name: '2. Extract Data (PDF -> Excel / DB)', value: 'extract' },
+                { name: '2. Extract Data (PDF -> Excel)', value: 'extract' },
                 { name: '3. Manage Data (Stats / Search)', value: 'manage' },
                 { name: '4. Exit', value: 'exit' }
             ]
@@ -85,25 +89,16 @@ async function mainMenu() {
         if (choice === 'scrape') {
             await startScraper();
         } else if (choice === 'extract') {
-            const answers = await inquirer.prompt([
-                {
-                    type: 'checkbox',
-                    name: 'targets',
-                    message: 'Export targets (Press <space> to select, <a> to toggle all, <i> to invert selection):',
-                    choices: [
-                        { name: 'Excel', value: 'Excel', checked: true },
-                        { name: 'Database', value: 'Database' }
-                    ],
-                    validate: (answer) => {
-                        if (answer.length < 1) {
-                            return 'You must choose at least one export target.';
-                        }
-                        return true;
-                    }
-                },
-                { type: 'input', name: 'dir', message: 'Source Directory:', default: 'pdfs' }
-            ]);
-            await processAllPdfs(answers.dir, answers.targets.includes('Excel'), answers.targets.includes('Database'));
+            console.log('\nStarting extraction...');
+            try {
+                // Try using venv python, fallback to system python
+                const pythonCmd = await fs.pathExists('venv/Scripts/python.exe') ? 'venv\\Scripts\\python.exe' : 'python';
+                const { stdout, stderr } = await execAsync(`${pythonCmd} gem_extract.py`);
+                console.log(stdout);
+                if (stderr) console.error('Extraction Errors:', stderr);
+            } catch (error) {
+                console.error('Failed to run extraction script:', error.message);
+            }
         } else if (choice === 'manage') {
             await startManager();
         }
