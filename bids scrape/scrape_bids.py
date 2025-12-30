@@ -27,6 +27,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "kali")
 data_queue = queue.Queue()
 # Event to signal "done fetching"
 done_event = threading.Event()
+DEBUG_MODE = False
 
 def create_database_if_not_exists():
     """Creates the database if it doesn't exist."""
@@ -150,7 +151,8 @@ def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
     data["csrf_bd_gem_nk"] = "e331d254a1625325352a675d7eff471e" 
 
     # print(f"[DEBUG] Fetching Page {page_num}...") 
-    print(f"[DEBUG] Fetching Page {page_num}...")
+    if DEBUG_MODE:
+        print(f"[DEBUG] Fetching Page {page_num}...")
 
     for attempt in range(retries):
         try:
@@ -291,9 +293,17 @@ def main():
     parser.add_argument("--from_date", type=str, default="", help="From Date (dd-mm-yyyy)")
     parser.add_argument("--to_date", type=str, default="", help="To Date (dd-mm-yyyy)")
     parser.add_argument("--pages", type=int, default=None, help="Specific page limit (overrides --test)")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--interactive", action="store_true", help="Force interactive mode")
     
+    # Default to interactive if no args provided
+    if len(sys.argv) == 1:
+        sys.argv.append('--interactive')
+        
     args = parser.parse_args()
+
+    global DEBUG_MODE
+    DEBUG_MODE = args.debug
     
     # Determine mode
     if args.interactive:
