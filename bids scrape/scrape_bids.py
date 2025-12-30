@@ -29,6 +29,10 @@ data_queue = queue.Queue()
 done_event = threading.Event()
 DEBUG_MODE = False
 
+# Error handling globals
+ERRORS_FILE = "errors.txt"
+error_file_lock = threading.Lock()
+
 def create_database_if_not_exists():
     """Creates the database if it doesn't exist."""
     try:
@@ -306,18 +310,43 @@ def main():
     DEBUG_MODE = args.debug
     
     # Determine mode
+    rescrape_errors = False
+    
     if args.interactive:
-        search_bid = input("Enter Search Bid Keyword (optional): ").strip()
-        from_date = input("Enter From Date (dd-mm-yyyy, optional): ").strip()
-        to_date = input("Enter To Date (dd-mm-yyyy, optional): ").strip()
-        reset_input = input("Delete existing data and start fresh? (y/n): ").strip().lower()
-        reset_db = reset_input == 'y'
+        # Check for error file first
+        if os.path.exists(ERRORS_FILE) and os.path.getsize(ERRORS_FILE) > 0:
+            with open(ERRORS_FILE, 'r') as f:
+                lines = f.readlines()
+                error_count = len(lines)
+            
+            if error_count > 0:
+                print(f"\n[INFO] Found {error_count} failed pages in '{ERRORS_FILE}'.")
+                user_choice = input("Do you want to rescrape these failed pages? (y/n): ").strip().lower()
+                if user_choice == 'y':
+                    rescrape_errors = True
         
-        workers_input = input("Enter number of worker threads (default 20): ").strip()
-        max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 20
-        
-        limit_pages_input = input("Limit number of pages to scrape (optional, press Enter for all): ").strip()
-        max_pages = int(limit_pages_input) if limit_pages_input.isdigit() and int(limit_pages_input) > 0 else None
+        if not rescrape_errors:
+            search_bid = input("Enter Search Bid Keyword (optional): ").strip()
+            from_date = input("Enter From Date (dd-mm-yyyy, optional): ").strip()
+            to_date = input("Enter To Date (dd-mm-yyyy, optional): ").strip()
+            reset_input = input("Delete existing data and start fresh? (y/n): ").strip().lower()
+            reset_db = reset_input == 'y'
+            
+            workers_input = input("Enter number of worker threads (default 20): ").strip()
+            max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 20
+            
+            limit_pages_input = input("Limit number of pages to scrape (optional, press Enter for all): ").strip()
+            max_pages = int(limit_pages_input) if limit_pages_input.isdigit() and int(limit_pages_input) > 0 else None
+        else:
+            # Defaults for rescrape mode
+            search_bid = ""
+            from_date = ""
+            to_date = ""
+            reset_db = False
+            max_workers = 20 # Can interactively ask if needed, but keeping it simple
+            max_pages = None
+            print("[INFO] Rescraping errors... (using default workers=20)")
+
     else:
         # CLI Mode
         search_bid = args.search
@@ -351,96 +380,112 @@ def main():
     consumer_thread = threading.Thread(target=db_worker, daemon=True)
     consumer_thread.start()
     
-    # 1. Fetch first page to get Total Count
-    first_page_url = "https://bidplus.gem.gov.in/all-bids-data"
+    # 1. Page Calculation
+    pages_to_fetch = []
     
-    # Quick headers/payload for first call
-    headers = {
-        "accept": "application/json, text/javascript, */*; q=0.01",
-        "accept-language": "en-US,en;q=0.9",
-        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-        "origin": "https://bidplus.gem.gov.in",
-        "referer": "https://bidplus.gem.gov.in/all-bids",
-        "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
-    }
-    
-    payload_dict = {
-        "param": {"searchBid": search_bid, "searchType": "fullText", "start": 0},
-        "filter": {
-            "bidStatusType": "bidrastatus", "byType": "all", "highBidValue": "",
-            "byEndDate": {"from": from_date, "to": to_date},
-            "sort": "Bid-End-Date-Latest", "byStatus": ""
+    if rescrape_errors:
+         try:
+            with open(ERRORS_FILE, 'r') as f:
+                pages_to_fetch = [int(line.strip()) for line in f if line.strip().isdigit()]
+            print(f"[INFO] Loaded {len(pages_to_fetch)} pages from {ERRORS_FILE}.")
+            
+            # Clear the file so we can fill it with NEW errors from this run
+            with open(ERRORS_FILE, 'w') as f:
+                f.truncate(0)
+                
+         except Exception as e:
+             print(f"[ERROR] Failed to read errors file: {e}")
+             return
+    else:
+        # Standard Fetch
+        # 1. Fetch first page to get Total Count
+        first_page_url = "https://bidplus.gem.gov.in/all-bids-data"
+        
+        # Quick headers/payload for first call
+        headers = {
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "origin": "https://bidplus.gem.gov.in",
+            "referer": "https://bidplus.gem.gov.in/all-bids",
+            "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
         }
-    }
-    data = {"payload": json.dumps(payload_dict), "csrf_bd_gem_nk": "e331d254a1625325352a675d7eff471e"}
-    
-    total_available = 0
-    max_init_retries = 3
-    
-    for attempt in range(max_init_retries):
-        try:
-            print(f"[INFO] Fetching initial metadata (Attempt {attempt+1}/{max_init_retries})...")
-            resp = requests.post(first_page_url, headers=headers, data=data, timeout=30)
-            resp.raise_for_status()
-            
-            j = resp.json()
-            # Validate response structure
-            if "response" not in j or "response" not in j["response"]:
-                raise ValueError("Invalid JSON structure: Missing 'response' key")
+        
+        payload_dict = {
+            "param": {"searchBid": search_bid, "searchType": "fullText", "start": 0},
+            "filter": {
+                "bidStatusType": "bidrastatus", "byType": "all", "highBidValue": "",
+                "byEndDate": {"from": from_date, "to": to_date},
+                "sort": "Bid-End-Date-Latest", "byStatus": ""
+            }
+        }
+        data = {"payload": json.dumps(payload_dict), "csrf_bd_gem_nk": "e331d254a1625325352a675d7eff471e" }
+        
+        total_available = 0
+        max_init_retries = 3
+        
+        for attempt in range(max_init_retries):
+            try:
+                print(f"[INFO] Fetching initial metadata (Attempt {attempt+1}/{max_init_retries})...")
+                resp = requests.post(first_page_url, headers=headers, data=data, timeout=30)
+                resp.raise_for_status()
                 
-            total_available = j['response']['response'].get('numFound', 0)
-            print(f"[INFO] Total records found: {total_available}")
-            
-            if total_available == 0:
-                 print("[WARN] Total records is 0. Please check your search filter or date range.")
-            
-            # Manually put the first batch
-            if "docs" in j["response"]["response"]:
-                docs = j["response"]["response"]["docs"]
-                print(f"[INFO] First batch fetched: {len(docs)} items.")
-                data_queue.put(docs)
-            else:
-                print("[WARN] No 'docs' in first batch.")
+                j = resp.json()
+                # Validate response structure
+                if "response" not in j or "response" not in j["response"]:
+                    raise ValueError("Invalid JSON structure: Missing 'response' key")
+                    
+                total_available = j['response']['response'].get('numFound', 0)
+                print(f"[INFO] Total records found: {total_available}")
                 
-            break # Success
+                if total_available == 0:
+                     print("[WARN] Total records is 0. Please check your search filter or date range.")
+                
+                # Manually put the first batch
+                if "docs" in j["response"]["response"]:
+                    docs = j["response"]["response"]["docs"]
+                    print(f"[INFO] First batch fetched: {len(docs)} items.")
+                    data_queue.put(docs)
+                else:
+                    print("[WARN] No 'docs' in first batch.")
+                    
+                break # Success
+                
+            except Exception as e:
+                print(f"[WARN] Initial fetch failed: {e}")
+                if attempt < max_init_retries - 1:
+                    time.sleep(2)
+                else:
+                    print("[FATAL] Could not fetch initial data after retries.")
+                    return
+        
+        # Calculate total pages
+        if total_available > 0:
+            per_page = 10 
+            total_pages = (total_available // per_page) + 1
             
-        except Exception as e:
-            print(f"[WARN] Initial fetch failed: {e}")
-            if attempt < max_init_retries - 1:
-                time.sleep(2)
-            else:
-                print("[FATAL] Could not fetch initial data after retries.")
-                return
+            # Generate list of pages to fetch. Start from page 2.
+            pages_to_fetch = list(range(2, total_pages + 1))
+            
+            if max_pages:
+                remaining_pages = max_pages - 1
+                if remaining_pages > 0:
+                     pages_to_fetch = pages_to_fetch[:remaining_pages]
+                else:
+                     pages_to_fetch = []
+                print(f"[INFO] Limiting scrape to next {len(pages_to_fetch)} pages.")
+        else:
+             pages_to_fetch = []
 
     # 2. Spawn Workers
-    # We fetched page 1 (which is index 1 for them?) manually? Wait, the initial fetch used start=0.
-    # The new logic uses "page": N.
-    # Let's assume the initial fetch we did in step 1 was effectively Page 1.
-    
-    # 2. Spawn Workers
     start_time = time.time()
-    
-    # Calculate total pages
-    per_page = 10 
-    total_pages = (total_available // per_page) + 1
     
     # Create Page Queue
     # Each item: (page_num, retry_count)
     page_queue = queue.Queue()
     
-    # Generate list of pages to fetch. Start from page 2.
-    pages_to_fetch = list(range(2, total_pages + 1))
-    
-    if max_pages:
-        remaining_pages = max_pages - 1
-        if remaining_pages > 0:
-             pages_to_fetch = pages_to_fetch[:remaining_pages]
-        else:
-             pages_to_fetch = []
-        print(f"[INFO] Limiting scrape to next {len(pages_to_fetch)} pages.")
-
     print(f"[INFO] Spawning {max_workers} workers for ~{len(pages_to_fetch)} pages...")
 
     for p in pages_to_fetch:
@@ -449,14 +494,6 @@ def main():
     def worker_task():
         while True:
             try:
-                # Non-blocking get not suitable if we want them to stay alive until queue is truly done?
-                # Actually, standard pattern is: get, process, task_done.
-                # If queue empty, break? 
-                # But other threads might push back items (retries).
-                # So getting with timeout is safer, or using a sentinel. 
-                # For simplicity here: queue.get(timeout=3) -> if empty after 3s and no active work?
-                # Let's use a "not empty" check or simply rely on the fact that we populate all first.
-                
                 try:
                     item = page_queue.get(timeout=3)
                 except queue.Empty:
@@ -479,7 +516,16 @@ def main():
                         # because we put a NEW item.
                         page_queue.task_done() 
                     else:
-                        print(f"[FAIL] Dropping Page {page_num} after {attempt} attempts.")
+                        print(f"[FAIL] Dropping Page {page_num} after {attempt} attempts. Saving to errors.txt.")
+                        
+                        # Save to errors.txt
+                        with error_file_lock:
+                            try:
+                                with open(ERRORS_FILE, "a") as f:
+                                    f.write(f"{page_num}\\n")
+                            except Exception as e:
+                                print(f"[ERROR] Could not write to errors.txt: {e}")
+                        
                         page_queue.task_done()
                         
             except Exception as e:
