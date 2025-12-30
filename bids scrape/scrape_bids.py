@@ -261,6 +261,9 @@ def fetch_bids_page(search_bid, from_date, to_date, page_num, cookie_set, retrie
     if DEBUG_MODE:
         print(f"[DEBUG] Fetching Page {page_num}...")
 
+    # Add 200ms delay before each request
+    time.sleep(0.2)
+
     for attempt in range(retries):
         try:
             response = requests.post(url, headers=headers, data=data, timeout=30)
