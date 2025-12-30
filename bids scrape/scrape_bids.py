@@ -34,6 +34,10 @@ DEBUG_MODE = False
 ERRORS_FILE = "errors.txt"
 error_file_lock = threading.Lock()
 
+# Skip list / Redundancy globals
+DUPLICATE_PAGES_FILE = "duplicate_pages.txt"
+duplicate_file_lock = threading.Lock()
+
 # Progress tracking globals
 PROGRESS_FILE = "progress.txt"
 progress_file_lock = threading.Lock()
@@ -52,6 +56,18 @@ COOKIE_POOL = [
     {
         "csrf_bd_gem_nk": "85a27261b6ffab1d79b4496fb381537d",
         "cookie": "csrf_gem_cookie=85a27261b6ffab1d79b4496fb381537d; ci_session=c0ca4f4959c84baf8abdc0057f12d82da337571e; GeM=1458192740.20480.0000; TS0174a79d=01e393167d43cb61c2ed60b65102d9a49dc82311bc3bf41e6e99e8c66f9fcd5f8c5d787526ea7dbd6736e6142c3a0ee13838b6f8fa2e370d06e0ddea380cd9e20509e8242b33d966c24a4558016d3697b93a1f28d2ebdabde39eda7ae29850d187b0499ffc; _ga=GA1.3.733646782.1767108018; _gid=GA1.3.24216270.1767108018; _gat=1; TS01dc9e29=01e393167db5bcea8df0a600284b06ed8d421d8dfc621b50d9c9297b0eee764f944ab6591d274c20217e9fec466771cd71e5ff330a; _ga_MMQ7TYBESB=GS2.3.s1767108018$o1$g0$t1767108018$j60$l0$h0"
+    },
+    {
+        "csrf_bd_gem_nk": "a57b3165f8fc5c80276b5994d1e52fb9",
+        "cookie": "csrf_gem_cookie=a57b3165f8fc5c80276b5994d1e52fb9; ci_session=802fd01457ce6423504f9b04e295f63bbf68d044; GeM=1474969956.20480.0000; TS0174a79d=01e393167d426cda702d7d8fb5f242df02072baadb01983b7d2f053dc6656494dc08de4ac70de52987df0a2f7d14f75cc648f056384ad85329928cc4fcb1acc362c38ebd442caa1b20c74d5a281b7d0639687476930e51574a128f8969f4ac7f324b43511b; TS01dc9e29=01e393167def79d4ca9d4e66622c063920823ce5def2855d955e262a0708ce57bea0997104d86c0a7497d873944a02fee7e889f7abf6f6cb9b5bd82b6ef5c7052b69f893d3"
+    },
+    {
+        "csrf_bd_gem_nk": "845e50cb42c7c91513d294fd4982bc79",
+        "cookie": "csrf_gem_cookie=845e50cb42c7c91513d294fd4982bc79; ci_session=4b1c3716024369bc1e3dcd46c3ecfb7a20e29ad4; GeM=1542078820.20480.0000; TS0174a79d=01e393167d75a3a6c4eb5fc873247513bb321db3088470c813514ee61ec44544e33db17ea96b054026dea37faf01cb46f9c87e1a6832dd8db8e65460cce78551962dc2449b394cde96307f7da287053f6af38ea5c0204ed8df1421f00713bd8c093bb195e7"
+    },
+    {
+        "csrf_bd_gem_nk": "165d08640356ca26d5f9d85683e1b935",
+        "cookie": "csrf_gem_cookie=165d08640356ca26d5f9d85683e1b935; ci_session=7218099c261672a436b28e64568f37e544262d04; GeM=1474969956.20480.0000; TS0174a79d=01e393167d31d203f98ce25b0a3d0f547a3b6d2f5823de73fd8d0caa72d0f7f357e7bb179489f159b8e0e3020110253ef023fd56711cb7239b341ce6122037e2bf6fdc9c26614111727f5402b8ef0a3907fac703e2ff596dda8e5ef2dfd35a54e37574fd90; TS01dc9e29=01e393167d7dc10aa21cdbce3e8c69ac3ca2c2e2398dfbec9bead2f8096208114a056a9e1e9ad9b401c320eca5a5b7eae735dbff73480daab5b022ee8e7f833cfc1c7cc249"
     }
 ]
 
@@ -143,13 +159,10 @@ def init_db(conn, reset=False):
     conn.commit()
     cur.close()
 
-def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
+def fetch_bids_page(search_bid, from_date, to_date, page_num, cookie_set, retries=3):
     """Fetches a single page of bid data. Runs in a worker thread."""
     url = "https://bidplus.gem.gov.in/all-bids-data"
     
-    # Pick a random cookie set
-    cookie_set = random.choice(COOKIE_POOL)
-
     headers = {
         "accept": "application/json, text/javascript, */*; q=0.01",
         "accept-language": "en-US,en;q=0.9",
@@ -192,8 +205,8 @@ def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
             json_data = response.json()
             if json_data and "response" in json_data and "response" in json_data["response"] and "docs" in json_data["response"]["response"]:
                 docs = json_data["response"]["response"]["docs"]
-                # Put results into generic queue
-                data_queue.put(docs)
+                # Put results into generic queue as (page_num, docs) tuple
+                data_queue.put((page_num, docs))
                 print(f"[INFO] Page {page_num} fetched ({len(docs)} items)")
                 return True
             else:
@@ -222,13 +235,26 @@ def db_worker():
     while True:
         try:
             # Block for 2 seconds waiting for item, then check done_event
-            docs = data_queue.get(timeout=2) 
+            item = data_queue.get(timeout=2)
+            # Support both new format and potentially legacy if mixed usage (unlikely here but good practice)
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], list):
+                page_num, docs = item
+            elif isinstance(item, list):
+                page_num = -1 # Unknown
+                docs = item
+            else:
+                print(f"[WARN] DB Worker received invalid Item: {type(item)}")
+                data_queue.task_done()
+                continue
+                
         except queue.Empty:
             if done_event.is_set():
                 break
             continue
         
         count = 0
+        new_records_count = 0 
+        
         for doc in docs:
             try:
                 def get_val(key, default=None):
@@ -268,13 +294,19 @@ def db_worker():
                 ON CONFLICT (b_id) DO UPDATE SET
                     b_status = EXCLUDED.b_status,
                     search_vector = EXCLUDED.search_vector,
-                    final_end_date_sort = EXCLUDED.final_end_date_sort;
+                    final_end_date_sort = EXCLUDED.final_end_date_sort
+                RETURNING (xmax = 0) AS is_insert;
                 """
                 cur.execute(query, (
                     b_id, b_bid_num, b_cat, b_cat_id, qty, status, b_type,
                     start_date, end_date, bd_cat, eval_type,
                     min_name, dept_name, sv_text
                 ))
+                
+                is_insert = cur.fetchone()[0]
+                if is_insert:
+                    new_records_count += 1
+                
                 count += 1
             except Exception as e:
                 # print(f"Skipping doc ID {doc.get('id', 'unknown')}: {e}")
@@ -282,6 +314,18 @@ def db_worker():
                 
         conn.commit()
         total_fetched += count
+        
+        # Redundancy check logic
+        if page_num != -1 and len(docs) > 0 and new_records_count == 0:
+             if DEBUG_MODE:
+                 print(f"[DEBUG] Page {page_num} is redundant (all records updated).")
+             with duplicate_file_lock:
+                 try:
+                     with open(DUPLICATE_PAGES_FILE, "a") as f:
+                         f.write(f"{page_num}\n")
+                 except Exception as e:
+                      print(f"[ERROR] Could not write to {DUPLICATE_PAGES_FILE}: {e}")
+
         data_queue.task_done()
     
     cur.close()
@@ -440,7 +484,9 @@ def main():
         # 1. Fetch first page to get Total Count
         first_page_url = "https://bidplus.gem.gov.in/all-bids-data"
         
-        # Quick headers/payload for first call
+        # Use first cookie for initial fetch
+        init_cookie = COOKIE_POOL[0]
+        
         headers = {
             "accept": "application/json, text/javascript, */*; q=0.01",
             "accept-language": "en-US,en;q=0.9",
@@ -449,7 +495,7 @@ def main():
             "X-Requested-With": "XMLHttpRequest",
             "origin": "https://bidplus.gem.gov.in",
             "referer": "https://bidplus.gem.gov.in/all-bids",
-            "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
+            "cookie": init_cookie["cookie"]
         }
         
         payload_dict = {
@@ -460,7 +506,7 @@ def main():
                 "sort": "Bid-End-Date-Latest", "byStatus": ""
             }
         }
-        data = {"payload": json.dumps(payload_dict), "csrf_bd_gem_nk": "e331d254a1625325352a675d7eff471e" }
+        data = {"payload": json.dumps(payload_dict), "csrf_bd_gem_nk": init_cookie["csrf_bd_gem_nk"] }
         
         total_available = 0
         max_init_retries = 3
@@ -482,11 +528,11 @@ def main():
                 if total_available == 0:
                      print("[WARN] Total records is 0. Please check your search filter or date range.")
                 
-                # Manually put the first batch
+                # Manually put the first batch (Page 1)
                 if "docs" in j["response"]["response"]:
                     docs = j["response"]["response"]["docs"]
                     print(f"[INFO] First batch fetched: {len(docs)} items.")
-                    data_queue.put(docs)
+                    data_queue.put((1, docs)) # Page 1
                 else:
                     print("[WARN] No 'docs' in first batch.")
                     
@@ -542,7 +588,10 @@ def main():
     for p in pages_to_fetch:
         page_queue.put((p, 0)) # page, attempts
 
-    def worker_task():
+    def worker_task(worker_index):
+        # Assign cookie set based on worker index (Round Robin)
+        cookie_set = COOKIE_POOL[worker_index % len(COOKIE_POOL)]
+        
         while True:
             try:
                 try:
@@ -554,7 +603,7 @@ def main():
                 
                 # Try fetching
                 # We reduce internal retries to 1 since we have queue retry
-                success = fetch_bids_page(search_bid, from_date, to_date, page_num, retries=1)
+                success = fetch_bids_page(search_bid, from_date, to_date, page_num, cookie_set, retries=1)
                 
                 if success:
                     # Log progress
@@ -575,8 +624,6 @@ def main():
                         print(f"[RETRY] Re-queuing Page {page_num} (Attempt {attempt+1})")
                         time.sleep(1) # Slight pause
                         page_queue.put((page_num, attempt + 1))
-                        # Note: We must call task_done for the FAILED item, 
-                        # because we put a NEW item.
                         page_queue.task_done() 
                     else:
                         print(f"[FAIL] Dropping Page {page_num} after {attempt} attempts. Saving to errors.txt.")
@@ -585,7 +632,7 @@ def main():
                         with error_file_lock:
                             try:
                                 with open(ERRORS_FILE, "a") as f:
-                                    f.write(f"{page_num}\\n")
+                                    f.write(f"{page_num}\n")
                             except Exception as e:
                                 print(f"[ERROR] Could not write to errors.txt: {e}")
                         
@@ -596,8 +643,8 @@ def main():
 
     # Start Worker Threads
     threads = []
-    for _ in range(max_workers):
-        t = threading.Thread(target=worker_task, daemon=True)
+    for i in range(max_workers):
+        t = threading.Thread(target=worker_task, args=(i,), daemon=True)
         t.start()
         threads.append(t)
         
@@ -647,7 +694,6 @@ def main():
             eta_str = str(time.strftime('%H:%M:%S', time.gmtime(eta_s)))
             
             # Display: Rate in Pages/s (or Records/s if preferred, let's do Pages/s as it's cleaner, or both)
-            # User likely thinks in records? Let's show records/s (approx rate_pages * 10)
             rec_rate = rate_pages * 10
             
             sys.stdout.write(f"\r[PROGRESS] Saved: {total_fetched} | Queue Pending: {unfinished} | Rate: {rec_rate:.1f}/s | ETA: {eta_str}   ")
@@ -663,7 +709,7 @@ def main():
             
         time.sleep(1)
 
-    # Wait for queue logic to flush (should be done due to loop break)
+    # Wait for queue logic to flush
     page_queue.join()
     
     # Signal DB worker to stop
