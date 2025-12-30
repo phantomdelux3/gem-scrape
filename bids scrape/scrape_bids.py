@@ -12,6 +12,7 @@ import concurrent.futures
 import queue
 import threading
 import argparse
+import random
 
 # Load env variables
 load_dotenv()
@@ -32,6 +33,27 @@ DEBUG_MODE = False
 # Error handling globals
 ERRORS_FILE = "errors.txt"
 error_file_lock = threading.Lock()
+
+# Progress tracking globals
+PROGRESS_FILE = "progress.txt"
+progress_file_lock = threading.Lock()
+pages_fetched_counter = 0
+pages_fetched_lock = threading.Lock()
+
+COOKIE_POOL = [
+    {
+        "csrf_bd_gem_nk": "e331d254a1625325352a675d7eff471e",
+        "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
+    },
+    {
+        "csrf_bd_gem_nk": "b5fb60626ae44c5480c44aa0f9bc1539",
+        "cookie": "_ga=GA1.3.484596475.1761793171; GeM=1474969956.20480.0000; ci_session=7c12fd6ff99b24e04d19daa46bc70b661e051b38; csrf_gem_cookie=b5fb60626ae44c5480c44aa0f9bc1539; TS0174a79d=01e393167d51c511867685cd9dce75231aca5f16074697fe94dcde0d7670cabd630be6d35ed6aa606ca5609346bfc4b71b29d7bbcc4e9d7760d006b73dc3ccdf4d9c637a5e31449a0a8098dab6536125c10037ec5c1e0fb7a800225f5d431005680a5a0c4f; TS01dc9e29=01e393167d076ba5fe9dbfce61d77a95f9374cc616c10ab9bd69afd9275b863fa10aa3c9db82b7244b7ca49810586252c2b99c8db35eef5f534770513073ea9884adef93da"
+    },
+    {
+        "csrf_bd_gem_nk": "85a27261b6ffab1d79b4496fb381537d",
+        "cookie": "csrf_gem_cookie=85a27261b6ffab1d79b4496fb381537d; ci_session=c0ca4f4959c84baf8abdc0057f12d82da337571e; GeM=1458192740.20480.0000; TS0174a79d=01e393167d43cb61c2ed60b65102d9a49dc82311bc3bf41e6e99e8c66f9fcd5f8c5d787526ea7dbd6736e6142c3a0ee13838b6f8fa2e370d06e0ddea380cd9e20509e8242b33d966c24a4558016d3697b93a1f28d2ebdabde39eda7ae29850d187b0499ffc; _ga=GA1.3.733646782.1767108018; _gid=GA1.3.24216270.1767108018; _gat=1; TS01dc9e29=01e393167db5bcea8df0a600284b06ed8d421d8dfc621b50d9c9297b0eee764f944ab6591d274c20217e9fec466771cd71e5ff330a; _ga_MMQ7TYBESB=GS2.3.s1767108018$o1$g0$t1767108018$j60$l0$h0"
+    }
+]
 
 def create_database_if_not_exists():
     """Creates the database if it doesn't exist."""
@@ -124,6 +146,10 @@ def init_db(conn, reset=False):
 def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
     """Fetches a single page of bid data. Runs in a worker thread."""
     url = "https://bidplus.gem.gov.in/all-bids-data"
+    
+    # Pick a random cookie set
+    cookie_set = random.choice(COOKIE_POOL)
+
     headers = {
         "accept": "application/json, text/javascript, */*; q=0.01",
         "accept-language": "en-US,en;q=0.9",
@@ -132,7 +158,7 @@ def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
         "X-Requested-With": "XMLHttpRequest",
         "origin": "https://bidplus.gem.gov.in",
         "referer": "https://bidplus.gem.gov.in/all-bids",
-        "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
+        "cookie": cookie_set["cookie"]
     }
 
     payload_dict = {
@@ -152,7 +178,7 @@ def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
     }
     
     data = {"payload": json.dumps(payload_dict)}
-    data["csrf_bd_gem_nk"] = "e331d254a1625325352a675d7eff471e" 
+    data["csrf_bd_gem_nk"] = cookie_set["csrf_bd_gem_nk"] 
 
     # print(f"[DEBUG] Fetching Page {page_num}...") 
     if DEBUG_MODE:
@@ -299,6 +325,7 @@ def main():
     parser.add_argument("--pages", type=int, default=None, help="Specific page limit (overrides --test)")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--interactive", action="store_true", help="Force interactive mode")
+    parser.add_argument("--resume", action="store_true", help="Resume from progress.txt")
     
     # Default to interactive if no args provided
     if len(sys.argv) == 1:
@@ -311,6 +338,7 @@ def main():
     
     # Determine mode
     rescrape_errors = False
+    resume_from_progress = args.resume
     
     if args.interactive:
         # Check for error file first
@@ -324,6 +352,17 @@ def main():
                 user_choice = input("Do you want to rescrape these failed pages? (y/n): ").strip().lower()
                 if user_choice == 'y':
                     rescrape_errors = True
+        
+        # Check for progress file
+        if not rescrape_errors and os.path.exists(PROGRESS_FILE) and os.path.getsize(PROGRESS_FILE) > 0:
+            with open(PROGRESS_FILE, 'r') as f:
+                progress_count = sum(1 for line in f if line.strip())
+            
+            if progress_count > 0:
+                print(f"\n[INFO] Found {progress_count} pages already scraped in '{PROGRESS_FILE}'.")
+                resume_choice = input("Do you want to resume? (y/n): ").strip().lower()
+                if resume_choice == 'y':
+                    resume_from_progress = True
         
         if not rescrape_errors:
             search_bid = input("Enter Search Bid Keyword (optional): ").strip()
@@ -479,6 +518,18 @@ def main():
         else:
              pages_to_fetch = []
 
+        if resume_from_progress and not rescrape_errors:
+             try:
+                 if os.path.exists(PROGRESS_FILE):
+                     with open(PROGRESS_FILE, 'r') as f:
+                         done_pages = set(int(line.strip()) for line in f if line.strip().isdigit())
+                     
+                     initial_count = len(pages_to_fetch)
+                     pages_to_fetch = [p for p in pages_to_fetch if p not in done_pages]
+                     print(f"[INFO] Resume: Skipped {initial_count - len(pages_to_fetch)} pages. {len(pages_to_fetch)} remaining.")
+             except Exception as e:
+                 print(f"[ERROR] Failed to read progress file: {e}")
+
     # 2. Spawn Workers
     start_time = time.time()
     
@@ -506,6 +557,18 @@ def main():
                 success = fetch_bids_page(search_bid, from_date, to_date, page_num, retries=1)
                 
                 if success:
+                    # Log progress
+                    with progress_file_lock:
+                        try:
+                            with open(PROGRESS_FILE, "a") as f:
+                                f.write(f"{page_num}\n")
+                        except Exception as e:
+                            print(f"[ERROR] Could not write to progress.txt: {e}")
+                    
+                    with pages_fetched_lock:
+                         global pages_fetched_counter
+                         pages_fetched_counter += 1
+
                     page_queue.task_done()
                 else:
                     if attempt < 3:
@@ -539,17 +602,55 @@ def main():
         threads.append(t)
         
     # Monitoring Loop
+    
+    # Moving Average Logic
+    history = [] # List of (timestamp, count)
+    WINDOW_SIZE = 10 # seconds
+
     while True:
         elapsed_time = time.time() - start_time
         unfinished = page_queue.unfinished_tasks
         
-        if total_fetched > 0 and elapsed_time > 0:
-            rate = total_fetched / elapsed_time
-            # remaining items = incomplete tasks in queue
-            eta_s = unfinished / (rate/10) if rate > 0 else 0 # rate is records/s, items are pages (10 recs)
+        # Update history for rate calculation
+        now = time.time()
+        with pages_fetched_lock:
+            current_count = pages_fetched_counter
+        
+        history.append((now, current_count))
+        
+        # Prune old history
+        while history and history[0][0] < now - WINDOW_SIZE:
+            history.pop(0)
+            
+        # Calculate instantaneous rate
+        if len(history) > 1:
+            delta_count = history[-1][1] - history[0][1]
+            delta_time = history[-1][0] - history[0][0]
+            if delta_time > 0:
+                rate_pages = delta_count / delta_time
+            else:
+                rate_pages = 0
+        else:
+             # Fallback to global average if not enough history
+             if elapsed_time > 0:
+                 rate_pages = current_count / elapsed_time
+             else:
+                 rate_pages = 0
+
+        if total_fetched >= 0: # Always show
+            # ETA based on pages
+            if rate_pages > 0:
+                eta_s = unfinished / rate_pages
+            else:
+                eta_s = 0
+            
             eta_str = str(time.strftime('%H:%M:%S', time.gmtime(eta_s)))
             
-            sys.stdout.write(f"\r[PROGRESS] Saved: {total_fetched} | Queue Pending: {unfinished} | Rate: {rate:.1f}/s | ETA: {eta_str}   ")
+            # Display: Rate in Pages/s (or Records/s if preferred, let's do Pages/s as it's cleaner, or both)
+            # User likely thinks in records? Let's show records/s (approx rate_pages * 10)
+            rec_rate = rate_pages * 10
+            
+            sys.stdout.write(f"\r[PROGRESS] Saved: {total_fetched} | Queue Pending: {unfinished} | Rate: {rec_rate:.1f}/s | ETA: {eta_str}   ")
             sys.stdout.flush()
         
         if page_queue.empty() and unfinished == 0:
