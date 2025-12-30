@@ -281,7 +281,8 @@ def fetch_bids_page(search_bid, from_date, to_date, page_num, cookie_set, retrie
             if attempt < retries - 1:
                 time.sleep(1 + attempt) # Backoff
             else:
-                print(f"[Error] Failed Page {page_num}: {e}")
+                csrf_token = cookie_set.get("csrf_bd_gem_nk", "unknown")
+                print(f"[Error] Failed Page {page_num} (CSRF: {csrf_token}): {e}")
                 return False
 
 def db_worker():
