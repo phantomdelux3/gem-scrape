@@ -11,6 +11,7 @@ import time
 import concurrent.futures
 import queue
 import threading
+import argparse
 
 # Load env variables
 load_dotenv()
@@ -115,7 +116,7 @@ def init_db(conn, reset=False):
     conn.commit()
     cur.close()
 
-def fetch_bids_page(search_bid, from_date, to_date, start_row, retries=3):
+def fetch_bids_page(search_bid, from_date, to_date, page_num, retries=3):
     """Fetches a single page of bid data. Runs in a worker thread."""
     url = "https://bidplus.gem.gov.in/all-bids-data"
     headers = {
@@ -126,14 +127,14 @@ def fetch_bids_page(search_bid, from_date, to_date, start_row, retries=3):
         "X-Requested-With": "XMLHttpRequest",
         "origin": "https://bidplus.gem.gov.in",
         "referer": "https://bidplus.gem.gov.in/all-bids",
-        "cookie": "_ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991; csrf_gem_cookie=8cc1b7dd8d2b7a3bf24c8d202e66efba; GeM=1474969956.20480.0000; TS01dc9e29=01e393167d41a87ef9148e2474363d258331045994ac93a6149a797dd7aa039861810c0ebf548e69a073d949244cf077fa4b3bd6b21cdb2943eca9160a7e1984637852f2a6; ci_session=f0448a5079d2e59679c5e00b8a2abe6c1c7133fa; TS0174a79d=01e393167d8212e6a7b01d2891a0115d589e25d300db9603187096b91ddc9ec081fc215ab39cfe607265e2129cdfaac1c1ee68435f1f814c26e65eae311061db80d197765115707d9b0f50a07d2bab97cb4c441ae5137a2977bc257408d15b5e198c708eba"
+        "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
     }
 
     payload_dict = {
+        "page": page_num,
         "param": {
             "searchBid": search_bid, 
-            "searchType": "fullText",
-            "start": start_row
+            "searchType": "fullText"
         },
         "filter": {
             "bidStatusType": "bidrastatus",
@@ -146,7 +147,10 @@ def fetch_bids_page(search_bid, from_date, to_date, start_row, retries=3):
     }
     
     data = {"payload": json.dumps(payload_dict)}
-    data["csrf_bd_gem_nk"] = "8cc1b7dd8d2b7a3bf24c8d202e66efba" 
+    data["csrf_bd_gem_nk"] = "e331d254a1625325352a675d7eff471e" 
+
+    # print(f"[DEBUG] Fetching Page {page_num}...") 
+    print(f"[DEBUG] Fetching Page {page_num}...")
 
     for attempt in range(retries):
         try:
@@ -158,16 +162,17 @@ def fetch_bids_page(search_bid, from_date, to_date, start_row, retries=3):
                 docs = json_data["response"]["response"]["docs"]
                 # Put results into generic queue
                 data_queue.put(docs)
+                print(f"[INFO] Page {page_num} fetched ({len(docs)} items)")
                 return True
             else:
                 if attempt == retries - 1:
-                    print(f"[WARN] Empty or valid but empty response at {start_row}")
+                    print(f"[WARN] Empty/invalid response for Page {page_num}")
                 return False
         except Exception as e:
             if attempt < retries - 1:
                 time.sleep(1 + attempt) # Backoff
             else:
-                print(f"[Error] Failed fetching start={start_row}: {e}")
+                print(f"[Error] Failed Page {page_num}: {e}")
                 return False
 
 def db_worker():
@@ -278,14 +283,46 @@ def main():
     print("       (Parallel Execution)         ")
     print("====================================")
     
-    search_bid = input("Enter Search Bid Keyword (optional): ").strip()
-    from_date = input("Enter From Date (dd-mm-yyyy, optional): ").strip()
-    to_date = input("Enter To Date (dd-mm-yyyy, optional): ").strip()
-    reset_input = input("Delete existing data and start fresh? (y/n): ").strip().lower()
-    reset_db = reset_input == 'y'
+    parser = argparse.ArgumentParser(description="Gem Bids Scraper")
+    parser.add_argument("-t", "--test", action="store_true", help="Run in test mode (limit to 10 pages)")
+    parser.add_argument("--reset", action="store_true", help="Reset the database (drop table)")
+    parser.add_argument("-w", "--workers", type=int, default=20, help="Number of worker threads (default: 20)")
+    parser.add_argument("--search", type=str, default="", help="Search keyword")
+    parser.add_argument("--from_date", type=str, default="", help="From Date (dd-mm-yyyy)")
+    parser.add_argument("--to_date", type=str, default="", help="To Date (dd-mm-yyyy)")
+    parser.add_argument("--pages", type=int, default=None, help="Specific page limit (overrides --test)")
+    parser.add_argument("--interactive", action="store_true", help="Force interactive mode")
     
-    workers_input = input("Enter number of worker threads (default 5): ").strip()
-    max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 5
+    args = parser.parse_args()
+    
+    # Determine mode
+    if args.interactive:
+        search_bid = input("Enter Search Bid Keyword (optional): ").strip()
+        from_date = input("Enter From Date (dd-mm-yyyy, optional): ").strip()
+        to_date = input("Enter To Date (dd-mm-yyyy, optional): ").strip()
+        reset_input = input("Delete existing data and start fresh? (y/n): ").strip().lower()
+        reset_db = reset_input == 'y'
+        
+        workers_input = input("Enter number of worker threads (default 20): ").strip()
+        max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 20
+        
+        limit_pages_input = input("Limit number of pages to scrape (optional, press Enter for all): ").strip()
+        max_pages = int(limit_pages_input) if limit_pages_input.isdigit() and int(limit_pages_input) > 0 else None
+    else:
+        # CLI Mode
+        search_bid = args.search
+        from_date = args.from_date
+        to_date = args.to_date
+        reset_db = args.reset
+        max_workers = args.workers
+        
+        if args.pages:
+            max_pages = args.pages
+        elif args.test:
+             print("[INFO] Test mode enabled: Limiting to 10 pages.")
+             max_pages = 10
+        else:
+            max_pages = None
     
     print("[INFO] Checking Database...")
     create_database_if_not_exists()
@@ -306,20 +343,19 @@ def main():
     
     # 1. Fetch first page to get Total Count
     first_page_url = "https://bidplus.gem.gov.in/all-bids-data"
-    # Reusing payload construction locally to get total count safely
-    # ideally we should modify fetch_bids_page to return metadata, but due to thread pool nature
-    # it is easier to do one synchronous call first.
     
     # Quick headers/payload for first call
     headers = {
         "accept": "application/json, text/javascript, */*; q=0.01",
+        "accept-language": "en-US,en;q=0.9",
         "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
         "origin": "https://bidplus.gem.gov.in",
         "referer": "https://bidplus.gem.gov.in/all-bids",
-        "cookie": "_ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991; csrf_gem_cookie=8cc1b7dd8d2b7a3bf24c8d202e66efba; GeM=1474969956.20480.0000; TS01dc9e29=01e393167d41a87ef9148e2474363d258331045994ac93a6149a797dd7aa039861810c0ebf548e69a073d949244cf077fa4b3bd6b21cdb2943eca9160a7e1984637852f2a6; ci_session=f0448a5079d2e59679c5e00b8a2abe6c1c7133fa; TS0174a79d=01e393167d8212e6a7b01d2891a0115d589e25d300db9603187096b91ddc9ec081fc215ab39cfe607265e2129cdfaac1c1ee68435f1f814c26e65eae311061db80d197765115707d9b0f50a07d2bab97cb4c441ae5137a2977bc257408d15b5e198c708eba"
+        "cookie": "csrf_gem_cookie=e331d254a1625325352a675d7eff471e; ci_session=e72373b6e945b9800026970b0837c53951942c57; TS0174a79d=01e393167d4a963be55d4c4af088a2d434fbd183521b8287cee50260d2dd642cd6618da0b8c76ab225e315b68566bd19fe820be4947b8f7ac675ef7912a451446b2133190d32eafe14ead8175e1d7dec7eeeff542e9388afc22660f2eec96b049cd2932333; GeM=1474969956.20480.0000; _ga=GA1.3.484596475.1761793171; _gid=GA1.3.2012138776.1767016991"
     }
+    
     payload_dict = {
         "param": {"searchBid": search_bid, "searchType": "fullText", "start": 0},
         "filter": {
@@ -328,67 +364,153 @@ def main():
             "sort": "Bid-End-Date-Latest", "byStatus": ""
         }
     }
-    data = {"payload": json.dumps(payload_dict), "csrf_bd_gem_nk": "8cc1b7dd8d2b7a3bf24c8d202e66efba"}
+    data = {"payload": json.dumps(payload_dict), "csrf_bd_gem_nk": "e331d254a1625325352a675d7eff471e"}
     
     total_available = 0
-    try:
-        resp = requests.post(first_page_url, headers=headers, data=data) 
-        j = resp.json()
-        total_available = j['response']['response'].get('numFound', 0)
-        print(f"[INFO] Total records found: {total_available}")
-        
-        # Manually put the first batch
-        if "docs" in j["response"]["response"]:
-            data_queue.put(j["response"]["response"]["docs"])
+    max_init_retries = 3
+    
+    for attempt in range(max_init_retries):
+        try:
+            print(f"[INFO] Fetching initial metadata (Attempt {attempt+1}/{max_init_retries})...")
+            resp = requests.post(first_page_url, headers=headers, data=data, timeout=30)
+            resp.raise_for_status()
             
-    except Exception as e:
-        print(f"[FATAL] Failed initial fetch: {e}")
-        return
+            j = resp.json()
+            # Validate response structure
+            if "response" not in j or "response" not in j["response"]:
+                raise ValueError("Invalid JSON structure: Missing 'response' key")
+                
+            total_available = j['response']['response'].get('numFound', 0)
+            print(f"[INFO] Total records found: {total_available}")
+            
+            if total_available == 0:
+                 print("[WARN] Total records is 0. Please check your search filter or date range.")
+            
+            # Manually put the first batch
+            if "docs" in j["response"]["response"]:
+                docs = j["response"]["response"]["docs"]
+                print(f"[INFO] First batch fetched: {len(docs)} items.")
+                data_queue.put(docs)
+            else:
+                print("[WARN] No 'docs' in first batch.")
+                
+            break # Success
+            
+        except Exception as e:
+            print(f"[WARN] Initial fetch failed: {e}")
+            if attempt < max_init_retries - 1:
+                time.sleep(2)
+            else:
+                print("[FATAL] Could not fetch initial data after retries.")
+                return
 
     # 2. Spawn Workers
-    # We start from row 10 since we fetched 0 already
+    # We fetched page 1 (which is index 1 for them?) manually? Wait, the initial fetch used start=0.
+    # The new logic uses "page": N.
+    # Let's assume the initial fetch we did in step 1 was effectively Page 1.
+    
+    # 2. Spawn Workers
     start_time = time.time()
-    page_size = 10
     
-    # Generate list of start offsets
-    # Limit max scraping to avoid infinite loop on huge datasets during demo/testing if needed
-    # But user wants all.
-    offsets = range(10, total_available, page_size)
+    # Calculate total pages
+    per_page = 10 
+    total_pages = (total_available // per_page) + 1
     
-    print(f"[INFO] Spawning {max_workers} workers for {len(offsets)} pages...")
+    # Create Page Queue
+    # Each item: (page_num, retry_count)
+    page_queue = queue.Queue()
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_bids_page, search_bid, from_date, to_date, o): o for o in offsets}
-        
-        # Monitoring loop
-        completed = 0
-        while not done_event.is_set():
-            # Check futures status
-            # Actually, futures will finish on their own. We just need to monitor Progress.
-            # But the 'total_fetched' is updating in the consumer thread.
-            
-            elapsed_time = time.time() - start_time
-            if total_fetched > 0 and elapsed_time > 0:
-                rate = total_fetched / elapsed_time
-                remaining = total_available - total_fetched
-                eta_s = remaining / rate if rate > 0 else 0
-                eta_str = str(time.strftime('%H:%M:%S', time.gmtime(eta_s)))
+    # Generate list of pages to fetch. Start from page 2.
+    pages_to_fetch = list(range(2, total_pages + 1))
+    
+    if max_pages:
+        remaining_pages = max_pages - 1
+        if remaining_pages > 0:
+             pages_to_fetch = pages_to_fetch[:remaining_pages]
+        else:
+             pages_to_fetch = []
+        print(f"[INFO] Limiting scrape to next {len(pages_to_fetch)} pages.")
+
+    print(f"[INFO] Spawning {max_workers} workers for ~{len(pages_to_fetch)} pages...")
+
+    for p in pages_to_fetch:
+        page_queue.put((p, 0)) # page, attempts
+
+    def worker_task():
+        while True:
+            try:
+                # Non-blocking get not suitable if we want them to stay alive until queue is truly done?
+                # Actually, standard pattern is: get, process, task_done.
+                # If queue empty, break? 
+                # But other threads might push back items (retries).
+                # So getting with timeout is safer, or using a sentinel. 
+                # For simplicity here: queue.get(timeout=3) -> if empty after 3s and no active work?
+                # Let's use a "not empty" check or simply rely on the fact that we populate all first.
                 
-                # Overwrite line
-                sys.stdout.write(f"\r[PROGRESS] Saved: {total_fetched}/{total_available} | Rate: {rate:.1f}/s | ETA: {eta_str}   ")
-                sys.stdout.flush()
+                try:
+                    item = page_queue.get(timeout=3)
+                except queue.Empty:
+                    return # Exit worker if queue is empty for 3s
+                
+                page_num, attempt = item
+                
+                # Try fetching
+                # We reduce internal retries to 1 since we have queue retry
+                success = fetch_bids_page(search_bid, from_date, to_date, page_num, retries=1)
+                
+                if success:
+                    page_queue.task_done()
+                else:
+                    if attempt < 3:
+                        print(f"[RETRY] Re-queuing Page {page_num} (Attempt {attempt+1})")
+                        time.sleep(1) # Slight pause
+                        page_queue.put((page_num, attempt + 1))
+                        # Note: We must call task_done for the FAILED item, 
+                        # because we put a NEW item.
+                        page_queue.task_done() 
+                    else:
+                        print(f"[FAIL] Dropping Page {page_num} after {attempt} attempts.")
+                        page_queue.task_done()
+                        
+            except Exception as e:
+                print(f"[FATAL WORKER ERROR] {e}")
+
+    # Start Worker Threads
+    threads = []
+    for _ in range(max_workers):
+        t = threading.Thread(target=worker_task, daemon=True)
+        t.start()
+        threads.append(t)
+        
+    # Monitoring Loop
+    while True:
+        elapsed_time = time.time() - start_time
+        unfinished = page_queue.unfinished_tasks
+        
+        if total_fetched > 0 and elapsed_time > 0:
+            rate = total_fetched / elapsed_time
+            # remaining items = incomplete tasks in queue
+            eta_s = unfinished / (rate/10) if rate > 0 else 0 # rate is records/s, items are pages (10 recs)
+            eta_str = str(time.strftime('%H:%M:%S', time.gmtime(eta_s)))
             
-            # Check if all futures are done
-            # A simple way is to check data_queue size or use shared counter for 'processed pages'
-            # But 'futures' dict holds them.
+            sys.stdout.write(f"\r[PROGRESS] Saved: {total_fetched} | Queue Pending: {unfinished} | Rate: {rate:.1f}/s | ETA: {eta_str}   ")
+            sys.stdout.flush()
+        
+        if page_queue.empty() and unfinished == 0:
+             break
+             
+        # Also check if all threads died?
+        if not any(t.is_alive() for t in threads):
+            print("\n[WARN] All worker threads died unexpectedly.")
+            break
             
-            pending = [f for f in futures if not f.done()]
-            if not pending and data_queue.empty():
-                done_event.set()
-                print("\n[INFO] All tasks completed.")
-                break
-            
-            time.sleep(1)
+        time.sleep(1)
+
+    # Wait for queue logic to flush (should be done due to loop break)
+    page_queue.join()
+    
+    # Signal DB worker to stop
+    done_event.set()
 
     # Wait for consumer to finish writing everything
     data_queue.join()
