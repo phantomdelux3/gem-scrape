@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS run_contracts (
 OTHER_SOURCE = "Other searches (no category)"
 # category label for PDFs that are in the database but not in any saved search result
 PDF_ONLY_SOURCE = "PDFs added without a search"
+# bump when _parsed_info() changes how contract numbers are matched, to re-index once
+PARSED_INDEX_VERSION = 2
 # small searchable summary kept next to each parsed PDF (the full data is compressed)
 INFO_KEYS = ("GeneratedDate", "BidNo", "TotalOrderValue", "Org_Ministry", "Org_Department", "Org_Name",
              "Buyer_Designation", "Buyer_Email", "Seller_Company", "Seller_Email", "Seller_Contact")
@@ -117,15 +119,20 @@ def _unpack(blob):
 
 
 def _parsed_info(path, data):
-    """(contract no, searchable summary JSON) for one parsed PDF."""
+    """(contract no, searchable summary JSON) for one parsed PDF.
+
+    Downloaded PDFs are named after the website's contract ID (GEMC-...), the same ID the search results
+    and the pdfs table use, so that name wins - the number printed inside a PDF may be written differently."""
+    stem = Path(path).stem
     if not data:
-        return Path(path).stem, None
+        return stem, None
     c = data.get("contract") or {}
     items = data.get("items") or []
     info = {k: c.get(k) for k in INFO_KEYS}
     info["Products"] = " | ".join(dict.fromkeys(str(i["ProductName"]) for i in items if i.get("ProductName")))[:1000]
     info["Categories"] = " | ".join(dict.fromkeys(str(i["Category"]) for i in items if i.get("Category")))[:1000]
-    return c.get("ContractNo") or Path(path).stem, json.dumps(info, ensure_ascii=False, default=str)
+    contract_no = stem if stem.upper().startswith("GEMC-") else (c.get("ContractNo") or stem)
+    return contract_no, json.dumps(info, ensure_ascii=False, default=str)
 
 
 class Storage:
@@ -148,6 +155,12 @@ class Storage:
         if "info" not in cols:
             self._conn.execute("ALTER TABLE parsed ADD COLUMN info TEXT")
         self._conn.execute("CREATE INDEX IF NOT EXISTS parsed_contract ON parsed(contract_no)")
+        # index built with older matching rules: clear it, backfill_parsed_index() rebuilds it once
+        row = self._conn.execute("SELECT value FROM kv WHERE key='parsed_index_version'").fetchone()
+        if row is None or json.loads(row[0]) < PARSED_INDEX_VERSION:
+            self._conn.execute("UPDATE parsed SET contract_no=NULL")
+            self._conn.execute("INSERT OR REPLACE INTO kv(key, value, at) VALUES ('parsed_index_version', ?, ?)",
+                               (json.dumps(PARSED_INDEX_VERSION), time.time()))
         # search results from older versions: use the one category that was saved with them
         self._conn.execute(
             "INSERT OR IGNORE INTO contract_sources(contract_no, source, first_seen) "
@@ -171,6 +184,8 @@ class Storage:
     # ----- search results ---------------------------------------------------
     def add_listing(self, cards, category=None):
         """Insert new result cards; returns how many were new."""
+        if not cards:
+            return 0
         now = time.time()
         rows = [(c["ContractNo"], c.get("ContractDate"), category or None,
                  json.dumps(c, ensure_ascii=False), now) for c in cards]
@@ -250,16 +265,21 @@ class Storage:
             self._exec("UPDATE parsed SET contract_no=?, info=? WHERE path=?", updates, many=True)
 
     def iter_parsed_contracts(self, contract_nos, version):
-        """Yield the parsed data of each wanted contract once, even if its PDF was read from two paths."""
+        """Yield (contract no, parsed data) once per wanted contract, even if its PDF was read from two paths."""
         wanted = set(contract_nos)
-        with self._lock:
-            rows = self._conn.execute("SELECT contract_no, data FROM parsed WHERE version=? AND data IS NOT NULL "
-                                      "ORDER BY parsed_at DESC", (version,)).fetchall()
-        seen = set()
-        for no, blob in rows:
-            if no in wanted and no not in seen:
-                seen.add(no)
-                yield _unpack(blob)
+        # pick the newest parse of each wanted contract first, then load only those blobs, a batch at a time
+        latest = {}
+        for no, path in self._query("SELECT contract_no, path FROM parsed WHERE version=? AND data IS NOT NULL "
+                                    "ORDER BY parsed_at", (version,)):
+            if no in wanted:
+                latest[no] = path
+        by_path = {path: no for no, path in latest.items()}
+        paths = list(by_path)
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            rows = self._query(f"SELECT path, data FROM parsed WHERE path IN ({','.join('?' * len(chunk))})", chunk)
+            for path, blob in rows:
+                yield by_path[path], _unpack(blob)
 
     # ----- everything known about each contract (Database tab) ---------------
     def contract_rows(self, version):
@@ -302,10 +322,12 @@ class Storage:
     def iter_parsed(self, paths, version):
         """Yield (path, data, error) for the given PDF paths, one row at a time (low memory)."""
         wanted = set(paths)
-        with self._lock:
-            rows = self._conn.execute("SELECT path, data, error FROM parsed WHERE version=?", (version,)).fetchall()
-        for path, blob, err in rows:
-            if path in wanted:
+        found = [p for (p,) in self._query("SELECT path FROM parsed WHERE version=?", (version,)) if p in wanted]
+        for i in range(0, len(found), 500):  # a batch at a time, not every blob in memory at once
+            chunk = found[i:i + 500]
+            rows = self._query(f"SELECT path, data, error FROM parsed WHERE path IN ({','.join('?' * len(chunk))})",
+                               chunk)
+            for path, blob, err in rows:
                 yield path, (_unpack(blob) if blob is not None else None), err
 
     def parsed_count(self, version):

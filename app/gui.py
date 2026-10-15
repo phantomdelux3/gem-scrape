@@ -147,7 +147,7 @@ def parse_dmy(s):
 
 def _sort_key(v):
     """Sort table cells as numbers, then dates, then text."""
-    s = v.replace(",", "").replace("%", "").replace("█", "").replace("░", "").strip()
+    s = v.replace(",", "").replace("%", "").replace("█", "").replace("▒", "").replace("░", "").strip()
     try:
         return (0, float(s), "")
     except ValueError:
@@ -280,7 +280,11 @@ class DownloadDialog(tk.Toplevel):
         x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 3)
         self.geometry(f"+{x}+{y}")
-        self.grab_set()
+        try:
+            self.wait_visibility()  # grab_set fails on a window that is not on screen yet
+            self.grab_set()
+        except tk.TclError:
+            pass  # still usable, just not modal
         self.focus_set()
         self.wait_window()
 
@@ -461,6 +465,7 @@ class App:
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        root.report_callback_exception = self._report_error  # button / event errors too
         root.after(150, self._poll)
         root.after(300, self._load_options)
 
@@ -590,8 +595,13 @@ class App:
         # --- progress
         prog = ttk.LabelFrame(right, text="Progress", padding=8)
         prog.pack(fill="both", expand=True)
-        self.sc_bar = ttk.Progressbar(prog, mode="determinate", maximum=1)
-        self.sc_bar.pack(fill="x")
+        bar_row = ttk.Frame(prog)
+        bar_row.pack(fill="x")
+        self.sc_pct = tk.StringVar(value="")
+        ttk.Label(bar_row, textvariable=self.sc_pct, style="StatV.TLabel", width=11, anchor="e").pack(side="right")
+        self.sc_bar = ttk.Progressbar(bar_row, mode="determinate", maximum=1)
+        self.sc_bar.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._bar_pulsing = False
         self.throttle_bar = ThrottleBar(prog)
         self.throttle_bar.pack(fill="x", pady=(6, 0))
         stats = ttk.Frame(prog)
@@ -947,7 +957,9 @@ class App:
         self.btn_start.configure(state="disabled")
         self.btn_pause.configure(state="normal", text="Pause")
         self.btn_stop.configure(state="normal")
+        self._stop_pulsing()
         self.sc_bar.configure(value=0)
+        self.sc_pct.set("")
 
     def _pause_scrape(self):
         if self.engine:
@@ -1014,6 +1026,28 @@ class App:
         ttk.Button(bottom, text="Refresh", command=load).pack(side="right", padx=6)
         load()
 
+    @staticmethod
+    def _scrape_progress(s):
+        """Searches done, including an estimate for the running search; None when it can't be estimated."""
+        total, done = s["queries_total"], s["queries_done"]
+        if s["finished"]:
+            return total if s["status"] == "Finished" else done
+        if total <= 1:
+            return None
+        progress = done
+        if done and done < total:
+            # pages the finished searches needed on average -> how far the running search probably is
+            avg_pages = (s["pages"] - s["query_pages"]) / done
+            if avg_pages > 0:
+                progress += min(0.95, s["query_pages"] / avg_pages)
+        return progress
+
+    def _stop_pulsing(self):
+        if self._bar_pulsing:
+            self.sc_bar.stop()
+            self.sc_bar.configure(mode="determinate")
+            self._bar_pulsing = False
+
     def _update_scrape_stats(self):
         if not self.engine:
             return
@@ -1028,19 +1062,35 @@ class App:
         else:
             self.sc_stats["read"].set("off")
         total, done = s["queries_total"], s["queries_done"]
-        self.sc_bar.configure(maximum=max(total, 1), value=done)
+        running = not s["finished"]
+        progress = self._scrape_progress(s)
+        if progress is None:
+            # one search (or the search list is still loading): GeM never says how many result pages there
+            # are, so a percentage is impossible - keep the bar moving instead of sitting at 0 %
+            if not self._bar_pulsing:
+                self.sc_bar.configure(mode="indeterminate")
+                self.sc_bar.start(15)
+                self._bar_pulsing = True
+            self.sc_pct.set(f"page {s['query_pages'] + 1:,}" if total else "starting")
+        else:
+            self._stop_pulsing()
+            self.sc_bar.configure(maximum=max(total, 1), value=progress)
+            self.sc_pct.set(f"{progress / max(total, 1) * 100:.1f} %")
         el = s["elapsed"]
         st = self.sc_stats
         st["status"].set(s["status"])
         st["elapsed"].set(fmt_duration(el))
-        if s["finished"]:
+        if not running:
             st["eta"].set("-")
-        elif done and total > done:
-            st["eta"].set(fmt_duration(el / done * (total - done)))
+        elif progress and total > progress:
+            st["eta"].set(fmt_duration(el / progress * (total - progress)))
         else:
-            st["eta"].set("calculating ..." if total > 1 else "-")
+            st["eta"].set("unknown (single search)" if total == 1 else "calculating ...")
         st["searches"].set(f"{done:,} / {total:,}")
-        self.sc_current.set(s["current"] or "-")
+        current = s["current"] or "-"
+        if running and s["query_pages"]:
+            current += f"  -  page {s['query_pages']:,}, {s['query_found']:,} contracts so far"
+        self.sc_current.set(current)
         st["pages"].set(f"{s['pages']:,}")
         st["found"].set(f"{s['found']:,}")
         st["downloaded"].set(f"{s['downloaded']:,}")
@@ -1366,7 +1416,7 @@ class App:
                 ("downloaded", "PDFs", 70, "e"), ("read", "Read into DB", 85, "e"),
                 ("pending", "Not read yet", 80, "e"), ("unreadable", "Unreadable", 75, "e"),
                 ("failed", "Dl failed", 65, "e"), ("missing", "No PDF yet", 75, "e"),
-                ("bar", "Progress (read / found)", 170, "w"), ("shared", "Also in other cats", 105, "e"),
+                ("bar", "Progress (█ read  ▒ downloaded)", 190, "w"), ("shared", "Also in other cats", 105, "e"),
                 ("last_added", "Last added", 115, "w")]
         frame, self.prog_tree = self._make_tree(prog, cols, height=7)
         frame.pack(fill="both", expand=True)
@@ -1515,8 +1565,8 @@ class App:
             self.q_cat.set(ANY_CATEGORY)
         self._fill_progress()
         self._db_search()
-        for callback in waiters:
-            callback(rows)
+        for callback in waiters:  # e.g. a Download dialog: run as its own event, not inside this handler
+            self.root.after_idle(callback, rows)
 
     def _fill_progress(self):
         cats, totals = self.db_progress
@@ -1528,7 +1578,8 @@ class App:
         keys = [c for c in tree["columns"]]
 
         def values(r):
-            return [db_report.bar(r["percent"]) if k == "bar" else
+            return [db_report.bar(r["percent"], r["downloaded"] / r["found"] * 100 if r["found"] else 0)
+                    if k == "bar" else
                     (f"{r[k]:,}" if isinstance(r[k], int) else r[k]) for k in keys]
         tree.insert("", "end", values=values(totals), tags=("total",))
         for r in cats:
@@ -2088,7 +2139,7 @@ class App:
             return
         rows = [self._history_values(r) for r in runs]
         self._run_export(base, f"History list ({choice['fmt'].upper()}, {len(rows):,} entries)", len(rows),
-                         lambda: downloads.write_tables(base, [("History", downloads.HISTORY_COLUMNS, rows)],
+                         lambda: downloads.write_tables(base, [("Run History", downloads.HISTORY_COLUMNS, rows)],
                                                         choice["fmt"]))
 
     # ---------------------------------------------------------------- help
@@ -2185,36 +2236,64 @@ class App:
         widget.configure(state="disabled")
 
     def _poll(self):
-        """Drain the message queue from worker threads; refresh stats twice a second."""
+        """Drain the message queue from worker threads; refresh stats twice a second.
+
+        Always reschedules itself, even after an error - otherwise the whole window stops updating."""
         try:
-            for _ in range(300):
-                kind, payload = self.msgq.get_nowait()
-                if kind == "sclog":
-                    self._log(self.sc_log, payload)
-                elif kind == "cvlog":
-                    self._log(self.cv_log, payload)
-                elif kind == "log":
-                    self._log(self.sc_log, payload)
-                elif kind == "call":
-                    payload()
-                elif kind == "scrape_done":
-                    self._scrape_finished(payload)
-                elif kind == "convert_done":
-                    self._convert_finished(payload)
-        except queue.Empty:
+            try:
+                for _ in range(300):
+                    kind, payload = self.msgq.get_nowait()
+                    if kind in ("sclog", "log"):
+                        self._log(self.sc_log, payload)
+                    elif kind == "cvlog":
+                        self._log(self.cv_log, payload)
+                    else:
+                        # handlers may open dialogs: run them as their own events so polling keeps going
+                        self.root.after_idle(self._handle_message, kind, payload)
+            except queue.Empty:
+                pass
+            now = time.time()
+            if now - getattr(self, "_last_stats", 0) > 0.5:
+                self._last_stats = now
+                if self.engine and self.engine.is_running():
+                    self._update_scrape_stats()
+                    self._db_stale = True
+                    # live category progress while the Database tab is open
+                    if self.nb.select() == str(self.tab_db) and now - self._db_last_load > DB_LIVE_REFRESH:
+                        self._db_refresh()
+                if self.convert_thread and self.convert_thread.is_alive():
+                    self._update_convert_stats()
+        except Exception:  # noqa: BLE001
+            self._report_error(*sys.exc_info())
+        finally:
+            self.root.after(150, self._poll)
+
+    def _handle_message(self, kind, payload):
+        if kind == "call":
+            payload()
+        elif kind == "scrape_done":
+            self._scrape_finished(payload)
+        elif kind == "convert_done":
+            self._convert_finished(payload)
+
+    def _report_error(self, exc_type, exc, tb):
+        """Unexpected error in the app itself: write it to error_log.txt (the .exe has no console) and say so."""
+        import traceback
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        log_file = self.data_dir / "error_log.txt"
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"--- {time.strftime('%d-%m-%Y %H:%M:%S')}  {APP_NAME} {APP_VERSION}\n{text}\n")
+        except OSError:
             pass
-        now = time.time()
-        if now - getattr(self, "_last_stats", 0) > 0.5:
-            self._last_stats = now
-            if self.engine and self.engine.is_running():
-                self._update_scrape_stats()
-                self._db_stale = True
-                # live category progress while the Database tab is open
-                if self.nb.select() == str(self.tab_db) and now - self._db_last_load > DB_LIVE_REFRESH:
-                    self._db_refresh()
-            if self.convert_thread and self.convert_thread.is_alive():
-                self._update_convert_stats()
-        self.root.after(150, self._poll)
+        try:
+            self._log(self.sc_log, f"Unexpected error: {exc_type.__name__}: {exc} (details in {log_file})")
+        except tk.TclError:
+            pass
+        if time.time() - getattr(self, "_last_error_box", 0) > 30:  # never a flood of popups
+            self._last_error_box = time.time()
+            messagebox.showerror(APP_NAME, f"Unexpected error: {exc}\n\nDetails were saved to:\n{log_file}\n\n"
+                                           f"Please email that file to {SUPPORT_EMAIL}.")
 
     # ------------------------------------------------------------- settings
     def _load_settings(self):

@@ -129,9 +129,11 @@ def _progress_row(name, g):
     }
 
 
-def bar(percent, width=12):
-    filled = int(round(percent / 100 * width))
-    return "█" * filled + "░" * (width - filled) + f" {percent:5.1f}%"
+def bar(percent, downloaded_percent=0.0, width=12):
+    """Text progress bar: █ read into the database, ▒ downloaded but not read yet, ░ still to do."""
+    read = int(round(percent / 100 * width))
+    got = max(read, int(round(downloaded_percent / 100 * width)))
+    return "█" * read + "▒" * (got - read) + "░" * (width - got) + f" {percent:5.1f}%"
 
 
 def search(rows, text="", category="", status="", date_from=None, date_to=None, only=None):

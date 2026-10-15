@@ -216,7 +216,8 @@ class GemClient:
                     resp.raise_for_status()  # a real client error: do not retry
                 self._after(host, "slow" if took >= RequestMonitor.SLOW_SECONDS else "ok", took, resp.status_code)
                 return resp
-            except (requests.ConnectionError, requests.Timeout) as e:
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
+                # ChunkedEncodingError = connection dropped mid-download: retry like any network error
                 self._after(host, "error", time.time() - t0, None)
                 err = e
             except BadResponse as e:
@@ -299,9 +300,9 @@ class GemClient:
     # ----- search ---------------------------------------------------------
     def search_page(self, params, page, label):
         """One page of search results -> list of card dicts ([] when the page is empty)."""
-        self.ensure_session()
         data = dict(params, page=str(page))
         for attempt in range(3):
+            self.ensure_session()
             body = self.request("POST", "/view_contracts/contract_details", label, data=data).text
             if not body.strip():
                 return []
@@ -311,9 +312,20 @@ class GemClient:
             # a non-empty body without contracts is an error page: treat it like throttling
             self._after(SEARCH_HOST, "throttled", 0, None)
             self.retry_count += 1
-            self.log(f"  ! {label}: unexpected page content - retrying")
+            if attempt >= 1:
+                # still wrong after a pause: the session has probably expired (long scrapes) - start a new one
+                self.reset_session()
+                self.log(f"  ! {label}: unexpected page content - renewing the session and retrying")
+            else:
+                self.log(f"  ! {label}: unexpected page content - retrying")
             self.sleep(RETRY_DELAYS[attempt])
         raise BadResponse("unexpected page content")
+
+    def reset_session(self):
+        """Forget the cookies; the next request opens the search page again for a fresh session."""
+        with self._session_lock:
+            self.session.cookies.clear()
+            self._session_ready = False
 
     def download_pdf(self, contract_id):
         self.ensure_session()

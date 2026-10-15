@@ -136,7 +136,9 @@ def build_queries(cfg, departments=None):
 
 class ScrapeStats:
     FIELDS = ("queries_total", "queries_done", "pages", "found", "new_results", "downloaded", "skipped",
-              "failed", "failed_queries", "bytes", "download_seconds", "read", "read_errors", "read_backlog")
+              "failed", "failed_queries", "bytes", "download_seconds", "read", "read_errors", "read_backlog",
+              "query_pages", "query_found")   # query_*: progress inside the search that is running now
+    LIVE_ONLY = ("read_backlog", "query_pages", "query_found")   # not kept in History
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -189,7 +191,9 @@ class ScrapeEngine:
         self.thread.start()
 
     def is_running(self):
-        return self.thread is not None and self.thread.is_alive()
+        # finished is set just before on_done is called, while the thread is still winding down - without this
+        # check, the "export when finished" step could see the scrape as still running and refuse to start
+        return self.thread is not None and self.thread.is_alive() and self.stats.finished is None
 
     def stop(self):
         self.stop_event.set()
@@ -213,13 +217,20 @@ class ScrapeEngine:
             self.have = self._sync_existing_pdfs()
             if cfg.download_pdfs and cfg.read_while_scraping:
                 self.reader = ParsePool(self.db, cfg.read_workers)
-            self.stats.status = "Running"
+            if not self.pause_event.is_set():  # keep "Paused" if the user paused during the PDF check
+                self.stats.status = "Running"
             self.log(f"{len(self.have):,} PDF(s) already downloaded - they will be skipped.")
 
             departments = None
             if cfg.mode == "ministry" and not (cfg.department or cfg.buyer_entity or cfg.organization):
                 self.stats.current = "Loading department list"
-                departments = self.client.get_departments(cfg.ministry, cfg.state) or None
+                try:
+                    departments = self.client.get_departments(cfg.ministry, cfg.state) or None
+                except StopRequested:
+                    raise
+                except Exception as e:  # noqa: BLE001 - still searchable, just slower
+                    self.log(f"Could not load the department list ({e}) - searching the whole ministry/state "
+                             "in one go instead.")
                 if departments:
                     self.log(f"{len(departments)} department(s) found - searching each one "
                              f"(much faster than one ministry-wide search).")
@@ -235,6 +246,7 @@ class ScrapeEngine:
                     if self.stop_event.is_set():
                         break
                     self.stats.current = label
+                    self.stats.set(query_pages=0, query_found=0)
                     try:
                         self._run_query(label, params, cat)
                     except StopRequested:
@@ -260,7 +272,8 @@ class ScrapeEngine:
                 s = self.stats.snapshot()
                 try:
                     self.db.finish_run(self.run_id, self.stats.status,
-                                       {k: s[k] for k in ScrapeStats.FIELDS + ("elapsed",) if k != "read_backlog"})
+                                       {k: s[k] for k in ScrapeStats.FIELDS + ("elapsed",)
+                                        if k not in ScrapeStats.LIVE_ONLY})
                 except Exception as e:  # noqa: BLE001 - history is optional, never fail the scrape on it
                     self.log(f"Could not save this run to History: {e}")
             self.log(f"Scrape {self.stats.status.lower()}.")
@@ -292,10 +305,13 @@ class ScrapeEngine:
             previous = ids
             new_results = self.db.add_listing(cards, cat)
             self.db.add_sources(ids, source_label(self.cfg, cat), self.run_id)
-            self.stats.add(pages=1, found=len(cards), new_results=new_results)
+            found = len(set(ids))
+            self.stats.add(pages=1, found=found, new_results=new_results, query_pages=1, query_found=found)
 
-            new = [c for c in cards if c["ContractNo"] not in self.have]
-            self.stats.add(skipped=len(cards) - len(new))
+            # a contract listed twice on one page must be downloaded (and counted) once
+            unique = list({c["ContractNo"]: c for c in cards}.values())
+            new = [c for c in unique if c["ContractNo"] not in self.have]
+            self.stats.add(skipped=len(unique) - len(new))
             if self.cfg.download_pdfs and new:
                 futures = [self.pool.submit(self._download, c) for c in new]
                 wait(futures)
@@ -304,9 +320,9 @@ class ScrapeEngine:
                         raise StopRequested()
             self._collect_reads()
             self.log(f"{label} | page {page + 1}: {len(cards)} contracts, {len(new)} new")
+            # a bid can have more contracts than fit on one page, so number searches page on too;
+            # the empty-page and repeated-page checks above end the loop
             page += 1
-            if self.cfg.mode == "number":
-                break
 
     def _download(self, card):
         cid = card["ContractNo"]

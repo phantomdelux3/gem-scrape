@@ -38,7 +38,10 @@ def write_tables(base, tables, fmt):
     """Write tables as one .xlsx (one sheet each) or as CSV (one file each; several files go in a folder
     named like the base). base: path without extension. Returns the written files."""
     base = Path(base)
-    names = _unique([safe_name(t[0], 31 if fmt == "xlsx" else 80) for t in tables])
+    names = [safe_name(t[0], 31 if fmt == "xlsx" else 80) for t in tables]
+    if fmt == "xlsx":  # Excel reserves the sheet name "History"
+        names = [f"{n} sheet" if n.lower() == "history" else n for n in names]
+    names = _unique(names)
     tables = [(n, cols, rows) for n, (_, cols, rows) in zip(names, tables)]
     if fmt == "xlsx":
         return [converter.write_tables_xlsx(base.parent / f"{base.name}.xlsx", tables)]
@@ -94,8 +97,10 @@ def download_contracts(db, rows, base, fmt="xlsx", full=False, split=False, cate
     wanted = {r["no"] for r in rows}
     listing = {no: card for no, card in db.listing().items() if no in wanted}
     parsed = {}
-    for data in db.iter_parsed_contracts(wanted, PARSER_VERSION):
-        parsed.setdefault(data["contract"].get("ContractNo"), data)
+    for no, data in db.iter_parsed_contracts(wanted, PARSER_VERSION):
+        # same contract number as the search results, so status / buying mode line up
+        data["contract"]["ContractNo"] = no
+        parsed[no] = data
 
     def detail(group_rows, first_sheet):
         nos = {r["no"] for r in group_rows}
