@@ -22,20 +22,110 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from . import converter, db_report
+from . import converter, db_report, downloads
+from .developer_banner import DeveloperBanner
 from .gem_client import GemClient
 from .pdf_parser import PARSER_VERSION
-from .scrape_engine import ScrapeConfig, ScrapeEngine, describe
+from .scrape_engine import ALL_CATEGORIES, NUMBER_SOURCE, ScrapeConfig, ScrapeEngine, describe, source_label
 from .storage import Storage, data_dir
 
 APP_NAME = "GeM Contract Scraper"
 APP_VERSION = "3.0"
+DEVELOPER_NAME = "deadpool1555"
+SUPPORT_EMAIL = "phantomdeluxe.0555@gmail.com"
 OPTIONS_MAX_AGE = 24 * 3600
 LOG_MAX_LINES = 3000
 DB_SHOW_MAX = 3000          # search results shown in the Database tab (Excel gets all of them)
 DB_LIVE_REFRESH = 15        # seconds between Database tab refreshes while scraping
 ANY_CATEGORY = "(any category)"
 ANY_STATUS = "(any status)"
+HISTORY_ANY = "(any)"
+
+# Help tab: (heading, items). "Term: text" shows the term in bold; "NOTE text" is a grey note.
+HELP_SECTIONS = [
+    ("Quick start", [
+        "Open 1. Scrape contracts and pick the categories you want (or a Ministry, or one Bid / Contract No.).",
+        "Choose the contract dates, or click a quick range such as Last 7 days.",
+        "Press Start scraping. PDFs download and are read into the database as they arrive.",
+        "Watch progress per category in 3. Database & search.",
+        "Download what you need to Excel from 3. Database & search, or export everything from 2. Convert PDFs.",
+    ]),
+    ("1. Scrape contracts", [
+        "Bid / Category: pick one or more categories (type to find them). No category selected = every contract.",
+        "Ministry / Organization: choose a Ministry and/or State; Department and Organization load by themselves. "
+        "Without a Department, each department is searched one by one (much faster on GeM).",
+        "Bid or Contract No.: fetch one bid's contracts or a single contract. Dates are not used.",
+        "Scrape + add to Excel: reads each PDF into the database while scraping, so the Excel export is instant. "
+        "It also spaces out requests, which keeps GeM calm.",
+        "Resume: run the same search again - PDFs you already have are skipped, failed ones are retried.",
+        "Throttling bar: one bar per request. Red = HTTP 500/429 (GeM is throttling), purple = timeout, "
+        "amber = slow. The pace slows down after errors and speeds back up by itself.",
+        "Pause / Stop: Stop finishes the current request first, nothing is lost.",
+    ]),
+    ("2. Convert PDFs", [
+        "Reads every PDF (current and older layouts, Bid/RA, services, multi-page tables) and writes Excel, "
+        "CSV and/or JSON. All text is English only.",
+        "Sheets and columns: everything is selected by default. Click a sheet name to choose its columns. "
+        "Your choice is remembered.",
+        "Cache: PDFs already read are not read again, so converting after new downloads is quick. Tick "
+        "'Re-read all PDFs' only after an app update that improves reading.",
+        "CPU workers: lower it on slower PCs to keep the computer responsive.",
+        "Sheets: Contracts, Items, Consignees, Specifications, Seller Summary, Buyer Summary and Search Results "
+        "(filled from the search pages, even without PDFs).",
+    ]),
+    ("3. Database & search", [
+        "Totals: unique contracts, PDFs downloaded, read into the database, waiting to be read, unreadable, "
+        "failed and not downloaded yet.",
+        "Progress by category: found / downloaded / read for each category with a progress bar. It updates live "
+        "while scraping. Click a column heading to sort, double-click a category to list its contracts.",
+        "No double counting: each contract is stored once by its contract number. A contract found under two "
+        "categories is listed under both, but counted once in the totals and in every Excel file.",
+        "Search: any words (contract or bid no., ministry, organisation, product, seller, buyer email), plus "
+        "category, status and contract date. Double-click a result to open its PDF.",
+        "Download (Excel / CSV): the current search results or the whole database - see Downloads below.",
+    ]),
+    ("4. History", [
+        "Every scrape, convert and download is listed with its date, duration and results.",
+        "Filters: type, status, category, run date (with Today / 7 days / 30 days / This month), only runs that "
+        "added new contracts, and free-text search.",
+        "Select several: Ctrl-click or Shift-click entries, 'Select all shown' or Ctrl+A.",
+        "Download contracts: from the selected runs or from all runs shown. A contract found by several runs is "
+        "written once.",
+        "Download history list: the selected entries, the entries shown, or the whole history.",
+        "Show / download its contracts: lists one run's contracts in 3. Database & search.",
+        "Run this search again: loads the search back into 1. Scrape contracts to repeat or resume it.",
+        "Deleting a history entry never deletes contracts, PDFs or downloaded files.",
+    ]),
+    ("Downloads (Excel / CSV)", [
+        "One row per contract: contract no., date, categories, database status, buyer, seller, value, PDF file.",
+        "Full details: every sheet (Contracts, Items, Consignees, Specifications, Summaries) using the sheets "
+        "and columns chosen in 2. Convert PDFs.",
+        "Categories: download all categories or tick only the ones you want (type to find them).",
+        "Split by category: an Excel list gets a Category Summary sheet, an All contracts sheet and one sheet per "
+        "category. Full details or CSV get one file per category, all in one folder.",
+        "Format: Excel (.xlsx) or CSV (.csv, opens in Excel; one file per table).",
+        "No double counting: every table has each contract once. With split, a contract in two categories "
+        "appears in both category sheets - and once in All contracts.",
+        "Every download is recorded in 4. History, where 'Open file' opens it again.",
+    ]),
+    ("Where your data is saved", [
+        "Everything is kept next to the app in the 'GeM Data' folder (or in %LOCALAPPDATA%\\GeM Scraper if the "
+        "app folder is read-only).",
+        "pdfs\\<year-month>\\: the downloaded contract PDFs.",
+        "gem_data.db: the database (search results, read PDF data, history, settings).",
+        "exports\\: Excel / CSV / JSON files.",
+        "NOTE Back up the whole 'GeM Data' folder to keep everything. Do not open gem_data.db while the app runs.",
+    ]),
+    ("Troubleshooting", [
+        "Lots of red bars: GeM is throttling. Let the app slow down by itself, or raise the base delay and lower "
+        "parallel downloads.",
+        "'is open in Excel': close the file in Excel and save again.",
+        "Categories list is empty: check your internet connection and press 'Refresh categories / ministries'.",
+        "Some PDFs failed: open 'Failures ...' to see why, then run the same search again to retry them.",
+        "PDF could not be read: the file may be damaged. Delete it from the pdfs folder and scrape again.",
+        "Still stuck? Email support (see the right) with a screenshot of the error.",
+    ]),
+]
 BAR_COLORS = {"ok": "#2e9d4f", "slow": "#e0a100", "throttled": "#d93025", "error": "#8e44ad"}
 
 
@@ -98,6 +188,154 @@ class ScrollFrame(ttk.Frame):
 
     def _wheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+
+class DownloadDialog(tk.Toplevel):
+    """Asks what to download. After it closes, .result is None (cancelled) or
+    {"scope", "full", "categories" (list or None = all), "split", "fmt" ("xlsx" | "csv")}.
+
+    scopes: [(key, label, enabled)]   categories: [(name, contract count)] or None"""
+
+    def __init__(self, parent, title, scopes, categories=None, detail=True, note=""):
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.resizable(False, False)
+        self.result = None
+        self.categories = categories or []
+        self.chosen = set()
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+
+        sec = ttk.LabelFrame(body, text="What to download", padding=8)
+        sec.pack(fill="x")
+        self.scope = tk.StringVar(value=next((k for k, _, ok in scopes if ok), scopes[0][0]))
+        for key, label, enabled in scopes:
+            ttk.Radiobutton(sec, text=label, value=key, variable=self.scope,
+                            state="normal" if enabled else "disabled").pack(anchor="w", pady=1)
+        if note:
+            ttk.Label(sec, text=note, style="Hint.TLabel").pack(anchor="w", pady=(2, 0))
+
+        self.full = tk.BooleanVar(value=False)
+        if detail:
+            sec = ttk.LabelFrame(body, text="Detail", padding=8)
+            sec.pack(fill="x", pady=(8, 0))
+            ttk.Radiobutton(sec, text="One row per contract (contract no., date, categories, status, buyer, "
+                                      "seller, value ...)", value=False, variable=self.full).pack(anchor="w")
+            ttk.Radiobutton(sec, text="Full details - every sheet (Contracts, Items, Consignees, Specifications, "
+                                      "Summaries),\nusing the sheets and columns chosen in 2. Convert PDFs",
+                            value=True, variable=self.full).pack(anchor="w", pady=(2, 0))
+
+        self.cat_mode = tk.StringVar(value="all")
+        self.split = tk.BooleanVar(value=False)
+        if self.categories:
+            sec = ttk.LabelFrame(body, text="Categories", padding=8)
+            sec.pack(fill="x", pady=(8, 0))
+            ttk.Radiobutton(sec, text=f"All categories ({len(self.categories):,})", value="all",
+                            variable=self.cat_mode, command=self._toggle_cats).pack(anchor="w")
+            ttk.Radiobutton(sec, text="Only the categories selected below", value="some", variable=self.cat_mode,
+                            command=self._toggle_cats).pack(anchor="w")
+            find = ttk.Frame(sec)
+            find.pack(fill="x", pady=(4, 2))
+            ttk.Label(find, text="Find").pack(side="left")
+            self.cat_find = tk.StringVar()
+            self.cat_find.trace_add("write", lambda *a: self._fill_cats())
+            self.find_entry = ttk.Entry(find, textvariable=self.cat_find, width=30)
+            self.find_entry.pack(side="left", padx=4, fill="x", expand=True)
+            ttk.Button(find, text="All shown", width=9, command=lambda: self._pick_all(True)).pack(side="left")
+            ttk.Button(find, text="None", width=6, command=lambda: self._pick_all(False)).pack(side="left", padx=2)
+            lf = ttk.Frame(sec)
+            lf.pack(fill="x")
+            self.cat_list = tk.Listbox(lf, selectmode="multiple", height=8, width=70, activestyle="none",
+                                       exportselection=False)
+            self.cat_list.pack(side="left", fill="x", expand=True)
+            sb = ttk.Scrollbar(lf, orient="vertical", command=self.cat_list.yview)
+            sb.pack(side="right", fill="y")
+            self.cat_list.configure(yscrollcommand=sb.set)
+            self.cat_list.bind("<<ListboxSelect>>", self._on_pick)
+            self.cat_info = tk.StringVar()
+            ttk.Label(sec, textvariable=self.cat_info, style="Hint.TLabel").pack(anchor="w")
+            ttk.Checkbutton(sec, text="Split by category - Excel list: one sheet per category;  full details or "
+                                      "CSV: one file per category", variable=self.split).pack(anchor="w", pady=(4, 0))
+            self._view = []
+            self._fill_cats()
+            self._toggle_cats()
+
+        sec = ttk.LabelFrame(body, text="Format", padding=8)
+        sec.pack(fill="x", pady=(8, 0))
+        self.fmt = tk.StringVar(value="xlsx")
+        ttk.Radiobutton(sec, text="Excel (.xlsx)", value="xlsx", variable=self.fmt).pack(side="left")
+        ttk.Radiobutton(sec, text="CSV (.csv)", value="csv", variable=self.fmt).pack(side="left", padx=12)
+        ttk.Label(body, text="When several files are made (CSV with more than one table, or full details split by "
+                             "category),\nthey are saved together in a folder named like the file you choose.",
+                  style="Hint.TLabel").pack(anchor="w", pady=(6, 0))
+
+        btns = ttk.Frame(body)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(btns, text="Download ...", style="Accent.TButton", command=self._ok).pack(side="right", padx=6)
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 3)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        self.focus_set()
+        self.wait_window()
+
+    def _fill_cats(self):
+        words = self.cat_find.get().lower().split()
+        self._view = [name for name, _ in self.categories if all(w in name.lower() for w in words)]
+        counts = dict(self.categories)
+        state = self.cat_list.cget("state")
+        self.cat_list.configure(state="normal")  # a disabled listbox ignores insert/delete
+        self.cat_list.delete(0, "end")
+        for i, name in enumerate(self._view):
+            self.cat_list.insert("end", f"{name}   ({counts[name]:,})")
+            if name in self.chosen:
+                self.cat_list.selection_set(i)
+        self.cat_list.configure(state=state)
+        self._update_info()
+
+    def _on_pick(self, event=None):
+        picked = set(self.cat_list.curselection())
+        for i, name in enumerate(self._view):
+            (self.chosen.add if i in picked else self.chosen.discard)(name)
+        self._update_info()
+
+    def _pick_all(self, value):
+        if self.cat_mode.get() != "some":
+            self.cat_mode.set("some")
+            self._toggle_cats()
+        for name in self._view:
+            (self.chosen.add if value else self.chosen.discard)(name)
+        self._fill_cats()
+
+    def _toggle_cats(self):
+        state = "normal" if self.cat_mode.get() == "some" else "disabled"
+        self.cat_list.configure(state=state)
+        self.find_entry.configure(state=state)
+        self._update_info()
+
+    def _update_info(self):
+        if self.cat_mode.get() == "all":
+            self.cat_info.set("Every category is included.")
+        else:
+            self.cat_info.set(f"{len(self.chosen):,} of {len(self.categories):,} categories selected "
+                              "(click to select / unselect).")
+
+    def _ok(self):
+        cats = None
+        if self.categories and self.cat_mode.get() == "some":
+            if not self.chosen:
+                messagebox.showwarning(APP_NAME, "Select at least one category, or choose 'All categories'.",
+                                       parent=self)
+                return
+            cats = sorted(self.chosen, key=str.lower)
+        self.result = {"scope": self.scope.get(), "full": self.full.get(), "categories": cats,
+                       "split": self.split.get(), "fmt": self.fmt.get()}
+        self.destroy()
 
 
 class ThrottleBar(ttk.Frame):
@@ -186,8 +424,10 @@ class App:
         self._db_stale = True
         self._db_last_load = 0
         self._db_search_job = None
+        self._db_waiters = []        # callbacks waiting for the database to load
         self._sort_state = {}
         self.history = []
+        self.h_shown = []            # history entries that pass the History tab filters
         self.db.close_stale_runs()
         self.settings = self._load_settings()
 
@@ -196,6 +436,7 @@ class App:
         root.minsize(900, 600)
         self._style()
 
+        DeveloperBanner(root, DEVELOPER_NAME).pack(fill="x", side="top")
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
         self.nb = nb
@@ -1120,7 +1361,7 @@ class App:
         self.prog_hide_done = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Hide completed categories", variable=self.prog_hide_done,
                         command=self._fill_progress).pack(side="left", padx=8)
-        ttk.Button(bar, text="Download progress to Excel", command=self._export_progress).pack(side="right")
+        ttk.Button(bar, text="Download progress (Excel / CSV) ...", command=self._export_progress).pack(side="right")
         cols = [("category", "Category / search", 300, "w"), ("found", "Found", 70, "e"),
                 ("downloaded", "PDFs", 70, "e"), ("read", "Read into DB", 85, "e"),
                 ("pending", "Not read yet", 80, "e"), ("unreadable", "Unreadable", 75, "e"),
@@ -1195,14 +1436,12 @@ class App:
         f3.pack(fill="x", pady=(4, 0))
         self.db_count = tk.StringVar(value="")
         ttk.Label(f3, textvariable=self.db_count, style="StatV.TLabel").pack(side="left")
-        ttk.Button(f3, text="Download Excel - full details", style="Accent.TButton",
-                   command=lambda: self._db_export(full=True)).pack(side="right")
-        ttk.Button(f3, text="Download Excel - this list", command=lambda: self._db_export(full=False)
-                   ).pack(side="right", padx=6)
-        ttk.Button(f3, text="Open PDF", command=self._open_result_pdf).pack(side="right")
-        ttk.Label(srch, text="'This list' = one row per contract as shown above.  'Full details' = the same contracts "
-                            "with every sheet (Items, Consignees, Sellers ...) using the sheets/columns chosen in "
-                            "the Convert tab. Each contract appears once.",
+        ttk.Button(f3, text="Download (Excel / CSV) ...", style="Accent.TButton", command=self._db_export
+                   ).pack(side="right")
+        ttk.Button(f3, text="Open PDF", command=self._open_result_pdf).pack(side="right", padx=6)
+        ttk.Label(srch, text="Download the search results or the whole database as Excel or CSV - one row per "
+                            "contract or full details (every sheet), all or chosen categories, optionally split "
+                            "by category. Each contract appears once.",
                   style="Hint.TLabel", wraplength=1000).pack(anchor="w", pady=(2, 0))
 
     def _on_tab_changed(self, event=None):
@@ -1220,6 +1459,14 @@ class App:
             self._db_refresh()
         elif current == str(self.tab_history):
             self._history_load()
+
+    def _with_db_rows(self, callback):
+        """Run callback(rows) with up-to-date contract rows, loading the database first if needed."""
+        if self.db_rows is not None and not self._db_stale:
+            callback(self.db_rows)
+            return
+        self._db_waiters.append(callback)
+        self._db_refresh()
 
     def _db_refresh(self):
         if self._db_loading:
@@ -1240,8 +1487,11 @@ class App:
 
     def _db_loaded(self, rows, progress, error):
         self._db_loading = False
+        waiters, self._db_waiters = self._db_waiters, []
         if error is not None:
             self.db_status.set(f"Could not load the database: {error}")
+            if waiters:
+                messagebox.showerror(APP_NAME, f"Could not load the database:\n{error}")
             return
         self._db_stale = False
         self.db_rows = rows
@@ -1265,6 +1515,8 @@ class App:
             self.q_cat.set(ANY_CATEGORY)
         self._fill_progress()
         self._db_search()
+        for callback in waiters:
+            callback(rows)
 
     def _fill_progress(self):
         cats, totals = self.db_progress
@@ -1304,11 +1556,21 @@ class App:
         if totals is None:
             messagebox.showinfo(APP_NAME, "The database is still loading.")
             return
-        path = self._ask_xlsx("gem_category_progress")
-        if path:
-            self._run_export(path, "Category progress", len(cats),
-                             lambda: converter.write_tables_xlsx(
-                                 path, [("Category Progress", db_report.PROGRESS_COLUMNS, [totals] + cats)]))
+        shown = {self.prog_tree.set(i, "category") for i in self.prog_tree.get_children()}
+        shown_cats = [c for c in cats if c["category"] in shown]
+        choice = DownloadDialog(self.root, "Download category progress", [
+            ("all", f"All categories ({len(cats):,})", True),
+            ("shown", f"Only the categories shown in the table ({len(shown_cats):,})", bool(shown_cats))],
+            detail=False).result
+        if not choice:
+            return
+        picked = cats if choice["scope"] == "all" else shown_cats
+        base = self._ask_save("gem_category_progress", choice["fmt"])
+        if base:
+            self._run_export(base, f"Category progress ({choice['fmt'].upper()}, {len(picked):,} categories)",
+                             len(picked), lambda: downloads.write_tables(
+                                 base, [("Category Progress", db_report.PROGRESS_COLUMNS, [totals] + picked)],
+                                 choice["fmt"]))
 
     # --- search
     def _schedule_db_search(self):
@@ -1378,97 +1640,166 @@ class App:
         else:
             messagebox.showinfo(APP_NAME, f"{r['no']}: the PDF is not downloaded yet ({r['status']}).")
 
-    def _db_export(self, full):
-        if self.db_rows is None:
-            messagebox.showinfo(APP_NAME, "The database is still loading.")
-            return
-        rows = list(self.db_results)
-        if not rows:
-            messagebox.showinfo(APP_NAME, "No contracts match the current search.")
-            return
+    def _db_export(self):
+        self._with_db_rows(self._db_export_dialog)
+
+    def _db_export_dialog(self, rows):
+        results = list(self.db_results)
         f = self._db_filters() or {}
-        parts = [f'"{f["text"].strip()}"' if f.get("text", "").strip() else "",
-                 f.get("category", ""), f.get("status", ""), self.db_only[0] if self.db_only else ""]
-        what = f"{len(rows):,} contracts" + (": " + ", ".join(p for p in parts if p) if any(parts) else " (all)")
-        path = self._ask_xlsx("gem_full_details" if full else "gem_contract_list")
-        if not path:
+        parts = [f'"{f["text"].strip()}"' if f.get("text", "").strip() else "", f.get("category", ""),
+                 f.get("status", ""), self.db_only[0] if self.db_only else ""]
+        search_desc = ", ".join(p for p in parts if p) or "no filters"
+        choice = DownloadDialog(self.root, "Download contracts", [
+            ("results", f"Current search results ({len(results):,} contracts - {search_desc})", bool(results)),
+            ("all", f"Everything in the database ({len(rows):,} contracts)", bool(rows))],
+            categories=self._category_counts(rows)).result
+        if choice:
+            picked, what = (results, f"search: {search_desc}") if choice["scope"] == "results" else (rows, "whole database")
+            self._download_contracts(picked, choice, what, "gem_contracts")
+
+    @staticmethod
+    def _category_counts(rows):
+        counts = {}
+        for r in rows:
+            for s in r["sources"]:
+                counts[s] = counts.get(s, 0) + 1
+        return sorted(counts.items(), key=lambda kv: kv[0].lower())
+
+    def _download_contracts(self, rows, choice, what, name):
+        """Download contracts chosen in a DownloadDialog (Database and History tabs)."""
+        rows = downloads.filter_categories(rows, choice["categories"])
+        if not rows:
+            messagebox.showinfo(APP_NAME, "No contracts match these choices.")
             return
-        if full:
-            selection = {k: v for k, v in self._selection().items() if v}
-            job = lambda: converter.export_contracts(  # noqa: E731
-                self.db, [r["no"] for r in rows], path, selection,
-                [("Search Matches", db_report.SEARCH_COLUMNS, rows)])
-        else:
-            job = lambda: converter.write_tables_xlsx(  # noqa: E731
-                path, [("Contracts", db_report.SEARCH_COLUMNS, rows)])
-        self._run_export(path, ("Full details - " if full else "List - ") + what, len(rows), job)
+        base = self._ask_save(name, choice["fmt"])
+        if not base:
+            return
+        fmt, full, split, cats = choice["fmt"], choice["full"], choice["split"], choice["categories"]
+        selection = self._selection()
+        title = (f"{'Full details' if full else 'Contract list'} ({fmt.upper()}"
+                 f"{', split by category' if split else ''}) - {len(rows):,} contracts - {what}"
+                 + (f" - categories: {', '.join(cats[:3])}{' ...' if len(cats) > 3 else ''}" if cats else ""))
+        self._run_export(base, title, len(rows), lambda: downloads.download_contracts(
+            self.db, rows, base, fmt, full, split, cats, selection))
 
-    def _ask_xlsx(self, name):
+    def _ask_save(self, name, fmt):
+        """Ask where to save; returns the path without extension (several files go in a folder of that name)."""
         self.export_dir.mkdir(parents=True, exist_ok=True)
-        return filedialog.asksaveasfilename(
-            title="Save Excel file", initialdir=str(self.export_dir), defaultextension=".xlsx",
-            initialfile=f"{name}_{time.strftime('%Y%m%d_%H%M')}.xlsx", filetypes=[("Excel", "*.xlsx")])
+        ext = "." + fmt
+        path = filedialog.asksaveasfilename(
+            title="Save as", initialdir=str(self.export_dir), defaultextension=ext,
+            initialfile=f"{name}_{time.strftime('%Y%m%d_%H%M')}{ext}",
+            filetypes=[("Excel workbook", "*.xlsx")] if fmt == "xlsx" else [("CSV file", "*.csv")])
+        return str(Path(path).with_suffix("")) if path else None
 
-    def _run_export(self, path, title, count, job):
-        """Write an Excel file in the background, record it in History, offer to open it."""
-        self.db_status.set(f"Writing {Path(path).name} ...")
+    def _run_export(self, base, title, count, job):
+        """Write files in the background (job returns the written paths), record it in History, offer to open."""
+        self.db_status.set(f"Writing {Path(base).name} ...")
         started = time.time()
 
         def work():
             try:
-                job()
-                self.db.add_run("Excel download", title, "Saved", {"contracts": count, "file": path,
+                files = [str(f) for f in job()]
+                self.db.add_run("Download", title, "Saved", {"contracts": count, "files": files,
                                                                    "seconds": time.time() - started},
                                 started=started)
-                self.msgq.put(("call", lambda: self._export_done(path, None)))
+                self.msgq.put(("call", lambda: self._export_done(files, None)))
             except Exception as e:  # noqa: BLE001
-                self.msgq.put(("call", lambda err=e: self._export_done(path, err)))
-        threading.Thread(target=work, daemon=True, name="excel").start()
+                self.msgq.put(("call", lambda err=e: self._export_done([], err)))
+        threading.Thread(target=work, daemon=True, name="download").start()
 
-    def _export_done(self, path, error):
+    def _export_done(self, files, error):
         if error is not None:
-            self.db_status.set("Excel download failed.")
-            messagebox.showerror(APP_NAME, f"Could not write the Excel file:\n{error}")
+            self.db_status.set("Download failed.")
+            messagebox.showerror(APP_NAME, f"Could not save the file:\n{error}")
             return
-        self.db_status.set(f"Saved {Path(path).name}")
         if self.nb.select() == str(self.tab_history):
             self._history_load()
-        if messagebox.askyesno(APP_NAME, f"Saved:\n{path}\n\nOpen it now?"):
-            open_path(path)
+        if len(files) == 1:
+            self.db_status.set(f"Saved {Path(files[0]).name}")
+            if messagebox.askyesno(APP_NAME, f"Saved:\n{files[0]}\n\nOpen it now?"):
+                open_path(files[0])
+            return
+        folder = Path(os.path.commonpath(files))
+        self.db_status.set(f"Saved {len(files)} files")
+        if messagebox.askyesno(APP_NAME, f"Saved {len(files)} files in:\n{folder}\n\nOpen the folder now?"):
+            open_path(folder)
 
     # ----------------------------------------------------------- history tab
     def _build_history_tab(self):
         t = self.tab_history
         t.columnconfigure(0, weight=1)
         t.rowconfigure(1, weight=1)
-        bar = ttk.Frame(t)
-        bar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(bar, text="Show").pack(side="left")
-        self.h_kind = tk.StringVar(value="Everything")
-        kb = ttk.Combobox(bar, textvariable=self.h_kind, width=16, state="readonly",
-                          values=["Everything", "Scrape", "Convert", "Excel download"])
-        kb.pack(side="left", padx=4)
-        kb.bind("<<ComboboxSelected>>", lambda e: self._history_fill())
-        ttk.Label(bar, text="Search").pack(side="left", padx=(8, 0))
+        flt = ttk.LabelFrame(t, text="Filters", padding=6)
+        flt.grid(row=0, column=0, sticky="ew")
+        refill = lambda *a: self._history_fill()  # noqa: E731
+
+        r1 = ttk.Frame(flt)
+        r1.pack(fill="x")
+        self.h_kind = tk.StringVar(value=HISTORY_ANY)
+        self.h_status = tk.StringVar(value=HISTORY_ANY)
+        self.h_cat = tk.StringVar(value=ANY_CATEGORY)
+        for label, var, values, width in (
+                ("Type", self.h_kind, [HISTORY_ANY, "Scrape", "Convert", "Download"], 11),
+                ("Status", self.h_status, [HISTORY_ANY, "Finished", "Stopped", "Saved", "Running", "Interrupted",
+                                           "Cancelled", "Error"], 11),
+                ("Category", self.h_cat, [ANY_CATEGORY], 30)):
+            ttk.Label(r1, text=label).pack(side="left", padx=(0 if label == "Type" else 8, 0))
+            box = ttk.Combobox(r1, textvariable=var, values=values, width=width, state="readonly")
+            box.pack(side="left", padx=4)
+            box.bind("<<ComboboxSelected>>", refill)
+            if label == "Category":
+                self.h_cat_box = box
+        ttk.Button(r1, text="Refresh", command=self._history_load).pack(side="right")
+        ttk.Button(r1, text="Clear filters", command=self._history_clear_filters).pack(side="right", padx=4)
+        ttk.Label(r1, text="Search").pack(side="left", padx=(8, 0))
         self.h_text = tk.StringVar()
-        self.h_text.trace_add("write", lambda *a: self._history_fill())
-        ttk.Entry(bar, textvariable=self.h_text, width=30).pack(side="left", padx=4)
-        ttk.Button(bar, text="Refresh", command=self._history_load).pack(side="left", padx=4)
-        ttk.Button(bar, text="Download history to Excel", command=self._history_export).pack(side="right")
+        self.h_text.trace_add("write", refill)
+        ttk.Entry(r1, textvariable=self.h_text, width=16).pack(side="left", padx=4, fill="x", expand=True)
+
+        r2 = ttk.Frame(flt)
+        r2.pack(fill="x", pady=(4, 0))
+        ttk.Label(r2, text="Run date from").pack(side="left")
+        self.h_from = tk.StringVar()
+        self.h_to = tk.StringVar()
+        ttk.Entry(r2, textvariable=self.h_from, width=11).pack(side="left", padx=4)
+        ttk.Label(r2, text="to").pack(side="left")
+        ttk.Entry(r2, textvariable=self.h_to, width=11).pack(side="left", padx=4)
+        for v in (self.h_from, self.h_to):
+            v.trace_add("write", refill)
+        for txt, days in (("Today", 1), ("7 days", 7), ("30 days", 30), ("This month", "month"), ("All time", None)):
+            ttk.Button(r2, text=txt, width=9, command=lambda d=days: self._history_quick_date(d)).pack(side="left",
+                                                                                                    padx=1)
+        self.h_new_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r2, text="Only runs that added new contracts", variable=self.h_new_only, command=refill
+                        ).pack(side="left", padx=(10, 0))
+
         self.h_summary = tk.StringVar(value="")
         ttk.Label(t, textvariable=self.h_summary, style="Hint.TLabel").grid(row=3, column=0, sticky="w")
 
         panes = ttk.Panedwindow(t, orient="vertical")
         panes.grid(row=1, column=0, sticky="nsew", pady=6)
+        top = ttk.Frame(panes)
+        panes.add(top, weight=3)
+        act = ttk.Frame(top)
+        act.pack(fill="x", side="bottom", pady=(4, 0))
+        self.h_sel_info = tk.StringVar(value="")
+        ttk.Label(act, textvariable=self.h_sel_info, style="StatV.TLabel").pack(side="left")
+        ttk.Button(act, text="Select all shown", command=self._history_select_all).pack(side="left", padx=8)
+        ttk.Button(act, text="Clear selection", command=lambda: self.h_tree.selection_set(())).pack(side="left")
+        ttk.Button(act, text="Download contracts (Excel / CSV) ...", style="Accent.TButton",
+                   command=self._history_download_contracts).pack(side="right")
+        ttk.Button(act, text="Download history list ...", command=self._history_export).pack(side="right", padx=6)
         cols = [("id", "#", 45, "e"), ("started", "Started", 120, "w"), ("kind", "Type", 95, "w"),
                 ("title", "Search / details", 330, "w"), ("status", "Status", 80, "w"),
                 ("duration", "Duration", 80, "e"), ("found", "Found", 70, "e"), ("new", "New", 65, "e"),
                 ("downloaded", "PDFs dl", 65, "e"), ("skipped", "Already had", 80, "e"),
                 ("failed", "Failed", 60, "e"), ("read", "Read", 65, "e"), ("contracts", "Unique contracts", 100, "e")]
-        frame, self.h_tree = self._make_tree(panes, cols, height=14)
-        panes.add(frame, weight=3)
+        frame, self.h_tree = self._make_tree(top, cols, height=12)
+        frame.pack(fill="both", expand=True)
         self.h_tree.tag_configure("bad", foreground="#b3261e")
         self.h_tree.bind("<<TreeviewSelect>>", lambda e: self._history_details())
+        self.h_tree.bind("<Control-a>", lambda e: self._history_select_all())
         self.h_tree.bind("<Double-Button-1>", lambda e: self._history_show_contracts())
 
         det = ttk.LabelFrame(panes, text="Details", padding=6)
@@ -1489,54 +1820,159 @@ class App:
         except Exception as e:  # noqa: BLE001
             self.h_summary.set(f"Could not load history: {e}")
             return
+        for run in self.history:
+            if run["kind"] == "Excel download":  # older name, before CSV downloads existed
+                run["kind"] = "Download"
+            run["categories"] = self._run_categories(run)
+        cats = sorted({c for run in self.history for c in run["categories"]}, key=str.lower)
+        self.h_cat_box.configure(values=[ANY_CATEGORY] + cats)
+        if self.h_cat.get() not in cats:
+            self.h_cat.set(ANY_CATEGORY)
         self._history_fill()
 
     @staticmethod
+    def _run_categories(run):
+        """Categories a scrape searched, named as in the Database tab."""
+        cfg = run["config"] or {}
+        if run["kind"] != "Scrape" or not cfg:
+            return []
+        if cfg.get("mode") == "category":
+            return [label for _, label in cfg.get("categories") or []] or [ALL_CATEGORIES]
+        if cfg.get("mode") == "ministry":
+            return [source_label(ScrapeConfig(**{k: cfg.get(k) or "" for k in (
+                "mode", "buyer_entity", "ministry", "state", "department", "organization")}), "")]
+        return [NUMBER_SOURCE]
+
+    @staticmethod
     def _history_values(run):
-        s = run["stats"]
+        s, cfg = run["stats"], run["config"] or {}
         dur = fmt_duration(run["finished"] - run["started"]) if run["finished"] else "running"
         num = lambda v: f"{v:,}" if isinstance(v, (int, float)) else ""  # noqa: E731
         if run["kind"] == "Convert":
             found, read, failed = s.get("total"), s.get("parsed"), s.get("errors")
-        elif run["kind"] == "Excel download":
+        elif run["kind"] == "Download":
             found, read, failed = s.get("contracts"), None, None
         else:
             found, read, failed = s.get("found"), s.get("read"), s.get("failed")
+        dates = ""
+        if cfg.get("from_date") and cfg.get("to_date"):
+            dates = " to ".join(date.fromisoformat(cfg[k]).strftime("%d-%m-%Y") for k in ("from_date", "to_date"))
         return {
             "id": run["id"], "started": time.strftime("%d-%m-%Y %H:%M", time.localtime(run["started"])),
             "kind": run["kind"], "title": run["title"] or "", "status": run["status"] or "", "duration": dur,
             "found": num(found), "new": num(s.get("new_results")), "downloaded": num(s.get("downloaded")),
             "skipped": num(s.get("skipped")), "failed": num(failed), "read": num(read),
             "contracts": num(run["contracts"]) if run["kind"] == "Scrape" else "",
+            "categories": " | ".join(run.get("categories") or []), "date_range": dates,
+            "file": " | ".join(s.get("files") or ([s["file"]] if s.get("file") else [])),
         }
+
+    def _history_quick_date(self, days):
+        today = date.today()
+        if days is None:
+            start = end = None
+        elif days == "month":
+            start, end = today.replace(day=1), today
+        else:
+            start, end = today - timedelta(days=days - 1), today
+        self.h_from.set(start.strftime("%d-%m-%Y") if start else "")
+        self.h_to.set(end.strftime("%d-%m-%Y") if end else "")
+
+    def _history_clear_filters(self):
+        self.h_kind.set(HISTORY_ANY)
+        self.h_status.set(HISTORY_ANY)
+        self.h_cat.set(ANY_CATEGORY)
+        self.h_new_only.set(False)
+        for v in (self.h_text, self.h_from, self.h_to):
+            v.set("")
+        self._history_fill()
 
     def _history_fill(self):
         tree = self.h_tree
         tree.delete(*tree.get_children())
-        kind = self.h_kind.get()
+        kind, status, cat = self.h_kind.get(), self.h_status.get(), self.h_cat.get()
         words = self.h_text.get().lower().split()
-        shown = 0
+        f, t = self.h_from.get().strip(), self.h_to.get().strip()
+        d_from, d_to = (parse_dmy(f) if f else None), (parse_dmy(t) if t else None)
+        bad_date = (f and not d_from) or (t and not d_to)
+        self.h_shown = []
         for run in self.history:
-            if kind != "Everything" and run["kind"] != kind:
+            if kind != HISTORY_ANY and run["kind"] != kind:
+                continue
+            if status != HISTORY_ANY and run["status"] != status:
+                continue
+            if cat != ANY_CATEGORY and cat not in run["categories"]:
+                continue
+            if self.h_new_only.get() and not run["stats"].get("new_results"):
+                continue
+            day = date.fromtimestamp(run["started"])
+            if (d_from and day < d_from) or (d_to and day > d_to):
                 continue
             v = self._history_values(run)
             if words and not all(w in " ".join(map(str, v.values())).lower() for w in words):
                 continue
             tag = ("bad",) if run["status"] in ("Error", "Interrupted") else ()
             tree.insert("", "end", iid=str(run["id"]), values=[v[k] for k in tree["columns"]], tags=tag)
-            shown += 1
-        scrapes = [r for r in self.history if r["kind"] == "Scrape"]
+            self.h_shown.append(run)
+        scrapes = [r for r in self.h_shown if r["kind"] == "Scrape"]
         self.h_summary.set(
-            f"{shown:,} of {len(self.history):,} entries  |  {len(scrapes):,} scrapes, "
-            f"{sum(r['stats'].get('new_results') or 0 for r in scrapes):,} new contracts added in total "
-            f"(a contract found again later is not added or counted twice)")
+            ("Dates must be DD-MM-YYYY - date filter ignored.  |  " if bad_date else "")
+            + f"{len(self.h_shown):,} of {len(self.history):,} entries shown  |  {len(scrapes):,} scrapes shown, "
+              f"{sum(r['stats'].get('new_results') or 0 for r in scrapes):,} new contracts added by them "
+              f"(a contract found again later is never added or counted twice)")
         self._history_details()
 
+    def _history_select_all(self):
+        self.h_tree.selection_set(self.h_tree.get_children())
+        return "break"
+
+    def _history_selected_runs(self):
+        ids = set(self.h_tree.selection())
+        return [r for r in self.h_shown if str(r["id"]) in ids]
+
+    def _history_download_contracts(self):
+        selected = [r for r in self._history_selected_runs() if r["kind"] == "Scrape"]
+        shown = [r for r in self.h_shown if r["kind"] == "Scrape"]
+        if not shown:
+            messagebox.showinfo(APP_NAME, "No scrape runs are shown. Contracts can be downloaded from scrape runs "
+                                          "(change the filters, or scrape first).")
+            return
+        sel_ids = set().union(*(self.db.run_contract_ids(r["id"]) for r in selected)) if selected else set()
+        shown_ids = set().union(*(self.db.run_contract_ids(r["id"]) for r in shown))
+
+        def ask(rows):
+            sel_rows = [r for r in rows if r["no"] in sel_ids]
+            shown_rows = [r for r in rows if r["no"] in shown_ids]
+            choice = DownloadDialog(self.root, "Download contracts from History", [
+                ("selected", f"Selected runs ({len(selected):,} runs, {len(sel_rows):,} unique contracts)",
+                 bool(sel_rows)),
+                ("shown", f"All runs shown ({len(shown):,} runs, {len(shown_rows):,} unique contracts)",
+                 bool(shown_rows))],
+                categories=self._category_counts(shown_rows),
+                note="A contract found by several runs is written once.").result
+            if not choice:
+                return
+            runs = selected if choice["scope"] == "selected" else shown
+            what = "runs " + ", ".join(f"#{r['id']}" for r in runs[:8]) + (" ..." if len(runs) > 8 else "")
+            self._download_contracts(sel_rows if choice["scope"] == "selected" else shown_rows, choice, what,
+                                     "gem_history_contracts")
+        if not shown_ids:
+            messagebox.showinfo(APP_NAME, "These runs have no saved contracts (they found none, or were run with "
+                                          "an older version of the app).")
+            return
+        self._with_db_rows(ask)
+
     def _history_selected(self):
-        sel = self.h_tree.focus()
-        return next((r for r in self.history if str(r["id"]) == sel), None) if sel else None
+        """The entry the Details pane and single-run buttons act on: the focused one if selected, else the first
+        selected."""
+        sel = self.h_tree.selection()
+        focus = self.h_tree.focus()
+        iid = focus if focus in sel else (sel[0] if sel else None)
+        return next((r for r in self.history if str(r["id"]) == iid), None) if iid else None
 
     def _history_details(self):
+        n = len(self.h_tree.selection())
+        self.h_sel_info.set(f"{n:,} selected" if n else "Ctrl/Shift-click to select several entries")
         run = self._history_selected()
         lines = []
         if run:
@@ -1636,61 +2072,101 @@ class App:
             self._history_load()
 
     def _history_export(self):
-        if not self.history:
-            messagebox.showinfo(APP_NAME, "History is empty.")
+        selected = self._history_selected_runs()
+        if not self.h_shown:
+            messagebox.showinfo(APP_NAME, "No history entries are shown.")
             return
-        path = self._ask_xlsx("gem_history")
-        if not path:
+        choice = DownloadDialog(self.root, "Download history list", [
+            ("selected", f"Selected entries ({len(selected):,})", bool(selected)),
+            ("shown", f"All entries shown ({len(self.h_shown):,})", True),
+            ("all", f"All history ({len(self.history):,}, ignoring the filters)", True)], detail=False).result
+        if not choice:
             return
-        cols = [(c, self.h_tree.heading(c, "text"), "number" if c == "id" else "text") for c in self.h_tree["columns"]]
-        rows = [self._history_values(r) for r in self.history]
-        self._run_export(path, f"History ({len(rows):,} entries)", len(rows),
-                         lambda: converter.write_tables_xlsx(path, [("History", cols, rows)]))
+        runs = {"selected": selected, "shown": self.h_shown, "all": self.history}[choice["scope"]]
+        base = self._ask_save("gem_history", choice["fmt"])
+        if not base:
+            return
+        rows = [self._history_values(r) for r in runs]
+        self._run_export(base, f"History list ({choice['fmt'].upper()}, {len(rows):,} entries)", len(rows),
+                         lambda: downloads.write_tables(base, [("History", downloads.HISTORY_COLUMNS, rows)],
+                                                        choice["fmt"]))
 
     # ---------------------------------------------------------------- help
     def _build_help_tab(self):
-        text = (
-            f"{APP_NAME} {APP_VERSION}\n\n"
-            "1. SCRAPE\n"
-            "   - Choose how to search, exactly like gem.gov.in/view_contracts:\n"
-            "       Bid / Category: pick one or more categories (type to search). No category = ALL contracts.\n"
-            "       Ministry / Organization: Ministry and/or State, then Department and Organization.\n"
-            "       Bid or Contract No.: fetch a single bid's contracts or one contract.\n"
-            "   - Choose the contract date range and press Start. Cookies are handled automatically.\n"
-            "   - Everything is stored next to the app in the 'GeM Data' folder: PDFs in pdfs\\<year-month>\\,\n"
-            "     all data in gem_data.db (SQLite), Excel/CSV/JSON in exports\\.\n"
-            "   - 'Scrape + add to Excel' reads each PDF into the database while scraping, so the Excel\n"
-            "     export at the end is instant. It also spaces out requests, which keeps GeM calm.\n"
-            "   - Running the same search again skips PDFs you already have (resume / retry failed).\n"
-            "   - The throttling bar shows every request: red = HTTP 500/429 (GeM throttling), purple =\n"
-            "     timeout. The pace adapts by itself: it slows down after errors and speeds back up.\n\n"
-            "2. CONVERT\n"
-            "   - Reads every PDF (current and older layouts, Bid/RA, services, multi-page tables) and writes\n"
-            "     Excel / CSV / JSON. All text is English only.\n"
-            "   - Pick which sheets and columns you want (everything is selected by default).\n"
-            "   - Already-read PDFs are cached, so converting again after new downloads is quick.\n"
-            "   - On slower PCs lower 'CPU workers' to keep the computer responsive.\n\n"
-            "3. DATABASE & SEARCH\n"
-            "   - Progress by category: for each category, how many contracts were found, how many PDFs are\n"
-            "     downloaded and how many are read into the database (with a progress bar). Updates live\n"
-            "     while scraping. Double-click a category to list its contracts.\n"
-            "   - No double counting: every contract is stored once by its contract number. A contract found\n"
-            "     under two categories is listed under both, but counted once in the totals and in Excel.\n"
-            "   - Search by any word (contract/bid no., ministry, organisation, product, seller, buyer email),\n"
-            "     category, status and contract date. Double-click a result to open its PDF.\n"
-            "   - Download Excel: 'this list' (one row per contract) or 'full details' (all sheets, using the\n"
-            "     sheets/columns chosen in the Convert tab) - only for the contracts that match.\n\n"
-            "4. HISTORY\n"
-            "   - Every scrape, convert and Excel download with its results. Select a scrape to list or\n"
-            "     download its contracts, or press 'Run this search again' to resume / repeat it.\n\n"
-            "SHEETS\n"
-            "   Contracts, Items, Consignees, Specifications, Seller Summary, Buyer Summary, Search Results\n"
-            "   (Search Results is filled from the search pages, even without PDFs).\n"
-        )
-        box = ScrolledText(self.tab_help, font=("Segoe UI", 10), wrap="word")
-        box.insert("1.0", text)
+        t = self.tab_help
+        t.columnconfigure(0, weight=1)
+        t.rowconfigure(1, weight=1)
+        head = ttk.Frame(t)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ttk.Label(head, text=f"{APP_NAME} {APP_VERSION}", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(head, text="Download GeM contract PDFs, read them into one database and export exactly the "
+                             "data you need to Excel.", style="Hint.TLabel").pack(anchor="w")
+
+        # --- the guide
+        box = ScrolledText(t, font=("Segoe UI", 10), wrap="word", padx=14, pady=10, borderwidth=1, relief="solid",
+                           cursor="arrow")
+        box.grid(row=1, column=0, sticky="nsew")
+        box.tag_configure("h", font=("Segoe UI", 12, "bold"), foreground="#1a5fb4", spacing1=14, spacing3=4)
+        box.tag_configure("item", lmargin1=10, lmargin2=28, spacing1=2)
+        box.tag_configure("term", font=("Segoe UI", 10, "bold"))
+        box.tag_configure("note", foreground="#555555", lmargin1=10, lmargin2=10, spacing1=4)
+        for i, (title, items) in enumerate(HELP_SECTIONS):
+            box.mark_set(f"sec{i}", "end-1c")
+            box.mark_gravity(f"sec{i}", "left")
+            box.insert("end", title + "\n", "h")
+            for n, item in enumerate(items, start=1):
+                if item.startswith("NOTE "):
+                    box.insert("end", item[5:] + "\n", "note")
+                    continue
+                bullet = f"{n}.  " if title == "Quick start" else "•  "
+                term, sep, rest = item.partition(": ")
+                if sep and len(term) < 40:  # "Term: explanation" -> bold term
+                    box.insert("end", bullet, "item")
+                    box.insert("end", term + ": ", ("item", "term"))
+                    box.insert("end", rest + "\n", "item")
+                else:
+                    box.insert("end", bullet + item + "\n", "item")
         box.configure(state="disabled")
-        box.pack(fill="both", expand=True)
+
+        # --- side panel: topics, shortcuts, support
+        side = ttk.Frame(t)
+        side.grid(row=1, column=1, sticky="ns", padx=(10, 0))
+        topics = ttk.LabelFrame(side, text="Topics", padding=6)
+        topics.pack(fill="x")
+        for i, (title, _) in enumerate(HELP_SECTIONS):
+            link = ttk.Label(topics, text=title, foreground="#1a5fb4", cursor="hand2")
+            link.pack(anchor="w", pady=1)
+            link.bind("<Button-1>", lambda e, m=f"sec{i}": box.yview(m))
+
+        quick = ttk.LabelFrame(side, text="Shortcuts", padding=6)
+        quick.pack(fill="x", pady=8)
+        for text, cmd in (("Open data folder", lambda: open_path(self.data_dir)),
+                          ("Open exports folder", lambda: open_path(self._conv_out())),
+                          ("Show failures ...", self._show_failures)):
+            ttk.Button(quick, text=text, command=cmd).pack(fill="x", pady=1)
+
+        support = ttk.LabelFrame(side, text="Support", padding=8)
+        support.pack(fill="x")
+        ttk.Label(support, text="Questions or problems? Email").pack(anchor="w")
+        mail = ttk.Label(support, text=SUPPORT_EMAIL, foreground="#1a5fb4", cursor="hand2",
+                         font=("Segoe UI", 9, "underline"))
+        mail.pack(anchor="w")
+        mail.bind("<Button-1>", lambda e: self._email_support())
+        ttk.Button(support, text="Copy email address", command=self._copy_support_email).pack(anchor="w", pady=(4, 6))
+        ttk.Label(support, text=f"{APP_NAME} is developed by {DEVELOPER_NAME}.", style="Hint.TLabel",
+                  wraplength=230).pack(anchor="w")
+        ttk.Label(support, text=f"Version {APP_VERSION}", style="Hint.TLabel").pack(anchor="w")
+
+    def _email_support(self):
+        import webbrowser
+        subject = f"{APP_NAME} {APP_VERSION} - question".replace(" ", "%20")
+        if not webbrowser.open(f"mailto:{SUPPORT_EMAIL}?subject={subject}"):
+            self._copy_support_email()
+
+    def _copy_support_email(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(SUPPORT_EMAIL)
+        messagebox.showinfo(APP_NAME, f"Copied {SUPPORT_EMAIL} to the clipboard.")
 
     # ------------------------------------------------------------- logging
     def _log(self, widget, msg):

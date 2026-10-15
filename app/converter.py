@@ -511,22 +511,6 @@ def write_tables_xlsx(path, tables):
     return path
 
 
-def export_contracts(db, contract_nos, path, selection=None, extra_tables=()):
-    """Full-detail Excel for just these contracts (Database tab / History downloads).
-
-    Every contract appears once, however many categories or PDF copies it has."""
-    selection = selection or default_selection()
-    wanted = set(contract_nos)
-    listing = {no: card for no, card in db.listing().items() if no in wanted}
-    parsed = sorted(db.iter_parsed_contracts(wanted, PARSER_VERSION),
-                    key=lambda d: d["contract"].get("ContractNo") or "")
-    sheets = build_rows(parsed, listing)
-    tables = list(extra_tables) + [(s, _columns_for(s, selection), sheets.get(s, []))
-                                   for s in SHEET_ORDER if selection.get(s)]
-    write_tables_xlsx(path, tables)
-    return {s: len(v) for s, v in sheets.items()}
-
-
 # ---------------------------------------------------------------------------
 # One-call conversion used by the GUI and the CLI
 # ---------------------------------------------------------------------------
@@ -586,4 +570,4 @@ def convert(db, pdf_dir, out_dir, base_name="gem_contracts", formats=("xlsx",), 
 
 
 __all__ = ["SCHEMA", "SHEET_ORDER", "ParsePool", "default_selection", "default_workers", "convert", "find_pdfs",
-           "export", "build_rows", "parse_pdfs", "english", "file_sig", "write_tables_xlsx", "export_contracts"]
+           "export", "build_rows", "parse_pdfs", "english", "file_sig", "write_tables_xlsx"]
