@@ -1,12 +1,13 @@
 import inquirer from 'inquirer';
-import { processAllPdfs } from './extractor.js';
-import { runScraper } from './scraper.js';
+import { runScraper, runExtraction, parseDate } from './scraper.js';
 import { showStats, searchContracts } from './manager.js';
-import fs from 'fs-extra';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 
-const execAsync = promisify(exec);
+function isValidDate(input) {
+    if (!/^\d{2}-\d{2}-\d{4}$/.test(input)) return false;
+    const [d, m, y] = input.split('-').map(Number);
+    const date = parseDate(input);
+    return date.getDate() === d && date.getMonth() === m - 1 && date.getFullYear() === y;
+}
 
 // --- SCRAPER FUNCTION ---
 async function startScraper() {
@@ -15,14 +16,15 @@ async function startScraper() {
         {
             type: 'input',
             name: 'cookie',
-            message: 'Enter the Cookie string:',
-            validate: (input) => input ? true : 'Cookie cannot be empty'
+            message: 'Cookie string (optional, not needed for public contracts):',
+            default: ''
         },
         {
             type: 'input',
             name: 'throttleTime',
-            message: 'Throttling time in ms (default 500):',
-            default: '500',
+            message: 'Throttling time in ms (default 1000):',
+            default: '1000',
+            validate: (input) => /^\d+$/.test(String(input).trim()) ? true : 'Enter a whole number',
             filter: (input) => parseInt(input, 10)
         },
         {
@@ -30,19 +32,30 @@ async function startScraper() {
             name: 'fromDate',
             message: 'Enter From Date (DD-MM-YYYY):',
             default: '01-01-2024',
-            validate: (input) => /^\d{2}-\d{2}-\d{4}$/.test(input) ? true : 'Invalid format'
+            validate: (input) => isValidDate(input) ? true : 'Invalid date (use DD-MM-YYYY)'
         },
         {
             type: 'input',
             name: 'toDate',
             message: 'Enter To Date (DD-MM-YYYY):',
             default: '31-03-2024',
-            validate: (input) => /^\d{2}-\d{2}-\d{4}$/.test(input) ? true : 'Invalid format'
+            validate: (input, prev) => {
+                if (!isValidDate(input)) return 'Invalid date (use DD-MM-YYYY)';
+                return parseDate(input) >= parseDate(prev.fromDate) ? true : 'To Date must be on or after From Date';
+            }
+        },
+        {
+            type: 'input',
+            name: 'windowDays',
+            message: 'Days per search window (smaller = fewer 500 errors, default 1):',
+            default: '1',
+            validate: (input) => /^[1-9]\d*$/.test(String(input).trim()) ? true : 'Enter a number >= 1',
+            filter: (input) => parseInt(input, 10)
         },
         { type: 'input', name: 'department', message: 'Department (optional):', default: '' },
         { type: 'input', name: 'bno', message: 'BNO (optional):', default: '' },
         { type: 'input', name: 'buyer_category', message: 'Buyer Category:', default: 'home_medi_pa46613086_me45117086_el71535221' },
-        { type: 'confirm', name: 'repeatTillDate', message: 'Repeat query till date?', default: false }
+        { type: 'confirm', name: 'repeatTillDate', message: 'Ignore To Date and scrape up to today?', default: false }
     ]);
 
     // Call the external scraper module
@@ -91,24 +104,7 @@ async function mainMenu() {
         } else if (choice === 'extract') {
             console.log('\nStarting extraction...');
             try {
-                // Try using venv python, fallback to system python
-                const pythonCmd = await fs.pathExists('venv/Scripts/python.exe') ? 'venv\\Scripts\\python.exe' : 'python';
-
-                // Use spawn with stdio: 'inherit' to show progress bar in real-time
-                const { spawn } = await import('child_process');
-
-                await new Promise((resolve, reject) => {
-                    const pyProcess = spawn(pythonCmd, ['gem_extract.py'], { stdio: 'inherit' });
-
-                    pyProcess.on('close', (code) => {
-                        if (code === 0) resolve();
-                        else reject(new Error(`Extraction process exited with code ${code}`));
-                    });
-
-                    pyProcess.on('error', (err) => {
-                        reject(err);
-                    });
-                });
+                await runExtraction();
             } catch (error) {
                 console.error('Failed to run extraction script:', error.message);
             }

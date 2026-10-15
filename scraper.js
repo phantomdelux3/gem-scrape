@@ -1,23 +1,30 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import inquirer from 'inquirer';
 import fs from 'fs-extra';
 import path from 'path';
 import qs from 'qs';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { SingleBar, Presets } from 'cli-progress';
-const execAsync = promisify(exec);
+import { spawn } from 'child_process';
 
 // Helper for delay
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const BASE_URL = 'https://gem.gov.in';
 const CACHE_FILE = 'temp-cache.txt';
+const FAILED_CONTRACTS_FILE = 'failed-contracts.txt';
+const FAILED_RANGES_FILE = 'failed-ranges.txt';
 const PDF_ROOT = 'pdfs';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
+
+// GeM returns intermittent HTTP 500s when hit repeatedly (rate limiting / overload).
+// They clear up after a pause, so every request is retried with growing back-off.
+const RETRY_DELAYS_MS = [5000, 10000, 20000, 40000, 60000, 90000];
+// Deep pages are slow on GeM's side (page 100 of a busy window takes ~25s).
+const REQUEST_TIMEOUT_MS = 180000;
+// Safety net in case the server ever ignores the page parameter.
+const MAX_PAGES_PER_WINDOW = 5000;
 
 // Date Helpers
-function parseDate(dateStr) {
+export function parseDate(dateStr) {
     const [d, m, y] = dateStr.split('-').map(Number);
     return new Date(y, m - 1, d);
 }
@@ -29,234 +36,247 @@ function formatDate(date) {
     return `${d}-${m}-${y}`;
 }
 
-function addMonths(date, months) {
-    const d = new Date(date);
-    d.setMonth(d.getMonth() + months);
-    if (d.getDate() !== date.getDate()) {
-        d.setDate(0);
-    }
-    return d;
-}
-
 function addDays(date, days) {
     const d = new Date(date);
     d.setDate(d.getDate() + days);
     return d;
 }
 
-async function scrapeRange(client, fromDateStr, toDateStr, options, stats, cachedIds, progressBar) {
-    const rangeFolder = `${fromDateStr}_to_${toDateStr}`;
-    const outputDir = path.join(PDF_ROOT, rangeFolder);
-    await fs.ensureDir(outputDir);
+// Split [from, to] into consecutive windows of `days` days. Small windows keep the
+// page count low; GeM gets slower (and fails more) the deeper you page.
+function buildWindows(from, to, days) {
+    const windows = [];
+    let start = from;
+    while (start <= to) {
+        let end = addDays(start, days - 1);
+        if (end > to) end = to;
+        windows.push({ from: formatDate(start), to: formatDate(end) });
+        start = addDays(end, 1);
+    }
+    return windows;
+}
 
-    console.log(`\n\n--- Scraping Period: ${fromDateStr} to ${toDateStr} ---`);
-    console.log(`Saving to: ${outputDir}`);
+function isRetryable(err) {
+    if (!err.response) return true; // network error / timeout / reset
+    const status = err.response.status;
+    return status >= 500 || status === 429 || status === 408 || status === 403;
+}
 
-    let page = 0;
-    let hasNext = true;
-
-    while (hasNext) {
+async function withRetry(label, fn) {
+    for (let attempt = 0; ; attempt++) {
         try {
-            const payload = {
-                fromDate: fromDateStr,
-                toDate: toDateStr,
-                department: options.department,
-                bno: options.bno,
-                buyer_category: options.buyer_category,
-                page: page.toString()
-            };
-
-            const response = await client.post('/view_contracts/contract_details', qs.stringify(payload));
-
-            const $ = cheerio.load(response.data);
-            const contractNodes = $('.block_header');
-
-            if (contractNodes.length === 0) {
-                hasNext = false;
-                break;
-            }
-
-            const contractsOnPage = [];
-            contractNodes.each((i, el) => {
-                const onclick = $(el).find('a').attr('onclick');
-                if (onclick) {
-                    const match = onclick.match(/'([^']+)'/);
-                    if (match && match[1]) {
-                        contractsOnPage.push(match[1]);
-                    }
-                }
-            });
-
-            if (contractsOnPage.length === 0) {
-                hasNext = false;
-                break;
-            }
-
-            progressBar.setTotal(stats.scraped + contractsOnPage.length + 50);
-
-            for (const contractId of contractsOnPage) {
-                stats.scraped++;
-
-                if (cachedIds.has(contractId)) {
-                    stats.skipped++;
-                    progressBar.increment(1, {
-                        total: stats.scraped + 10,
-                        downloaded: stats.downloaded,
-                        speed: 'Cached'
-                    });
-                    continue;
-                }
-
-                try {
-                    // Throttling
-                    await sleep(options.throttleTime);
-
-                    const startDl = Date.now();
-
-                    const dlPayload = { oid: contractId };
-                    const dlRes = await client.post('/view_contracts/sbtCaptcha', qs.stringify(dlPayload));
-
-                    if (dlRes.data && dlRes.data.status === '1') {
-                        let downloadUrl = '';
-                        const hrefMatch = dlRes.data.code.match(/href=\\?"([^"]+)\\?"/);
-
-                        if (hrefMatch && hrefMatch[1]) {
-                            downloadUrl = hrefMatch[1];
-                            downloadUrl = downloadUrl.replace(/\\\//g, '/');
-                        } else {
-                            const $link = cheerio.load(dlRes.data.code);
-                            downloadUrl = $link('a').attr('href');
-                        }
-
-                        if (downloadUrl) {
-                            const pdfRes = await client.get(downloadUrl, { responseType: 'arraybuffer' });
-                            await fs.writeFile(path.join(outputDir, `${contractId}.pdf`), pdfRes.data);
-
-                            await fs.appendFile(CACHE_FILE, `${contractId}\n`);
-                            cachedIds.add(contractId);
-                            stats.downloaded++;
-
-                            const dlTime = Date.now() - startDl;
-                            progressBar.increment(1, {
-                                total: stats.scraped + 10,
-                                downloaded: stats.downloaded,
-                                speed: `${dlTime}ms`
-                            });
-                        } else {
-                            stats.failed++;
-                            progressBar.increment(1, { speed: 'NoURL' });
-                        }
-                    } else {
-                        stats.failed++;
-                        progressBar.increment(1, { speed: 'ErrStatus' });
-                    }
-
-                } catch (err) {
-                    stats.failed++;
-                    progressBar.increment(1, { speed: 'Error' });
-                }
-            }
-
-            page++;
-            await sleep(1000);
-
+            return await fn();
         } catch (err) {
-            console.error(`\nError scraping page: ${err.message}`);
-            hasNext = false;
+            if (attempt >= RETRY_DELAYS_MS.length || !isRetryable(err)) throw err;
+            const wait = RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 2000);
+            const reason = err.response ? `HTTP ${err.response.status}` : err.code || err.message;
+            console.warn(`  ! ${label}: ${reason} - retry ${attempt + 1}/${RETRY_DELAYS_MS.length} in ${Math.round(wait / 1000)}s`);
+            await sleep(wait);
         }
     }
 }
 
-export async function runScraper(answers) {
-    const { cookie, throttleTime, department, bno, buyer_category, repeatTillDate } = answers;
-    let { fromDate: currentFromStr, toDate: currentToStr } = answers;
+class BadResponseError extends Error {
+    constructor(message) {
+        super(message);
+        // Treat like a 5xx so it gets retried.
+        this.response = { status: 502 };
+    }
+}
 
-    // Setup Axios
-    const client = axios.create({
-        baseURL: BASE_URL,
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Origin': 'https://gem.gov.in',
-            'Referer': 'https://gem.gov.in/view_contracts',
-            'Cookie': cookie
-        }
+async function fetchListPage(client, window, options, page) {
+    const payload = {
+        fromDate: window.from,
+        toDate: window.to,
+        department: options.department,
+        bno: options.bno,
+        buyer_category: options.buyer_category,
+        page: page.toString()
+    };
+
+    return withRetry(`${window.from}..${window.to} page ${page}`, async () => {
+        const response = await client.post('/view_contracts/contract_details', qs.stringify(payload), { responseType: 'text' });
+        const html = String(response.data ?? '');
+        if (!html.trim()) return [];
+
+        const $ = cheerio.load(html);
+        const ids = [];
+        $('.block_header a[onclick]').each((i, el) => {
+            const match = $(el).attr('onclick').match(/openCap\('([^']+)'\)/);
+            if (match) ids.push(match[1]);
+        });
+
+        // A non-empty body without contracts is an error page, not the end of results.
+        if (ids.length === 0) throw new BadResponseError('unexpected page content');
+        return ids;
     });
+}
+
+async function downloadContract(client, contractId, outputDir) {
+    const dlRes = await withRetry(`${contractId} link`, () =>
+        client.post('/view_contracts/sbtCaptcha', qs.stringify({ oid: contractId }))
+    );
+
+    let data = dlRes.data;
+    if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch { throw new Error('download link response is not JSON'); }
+    }
+    if (!data || String(data.status) !== '1' || !data.code) {
+        throw new Error(`download link status ${data?.status}`);
+    }
+
+    const downloadUrl = cheerio.load(data.code)('a').attr('href');
+    if (!downloadUrl) throw new Error('no download URL in response');
+
+    // The PDF is served from fulfilment.gem.gov.in, so use a plain GET without the gem.gov.in AJAX headers.
+    const pdfRes = await withRetry(`${contractId} pdf`, async () => {
+        const res = await axios.get(new URL(downloadUrl, BASE_URL).href, {
+            responseType: 'arraybuffer',
+            timeout: REQUEST_TIMEOUT_MS,
+            headers: { 'User-Agent': USER_AGENT, 'Referer': `${BASE_URL}/` }
+        });
+        const buf = Buffer.from(res.data);
+        if (buf.subarray(0, 5).toString('latin1') !== '%PDF-') {
+            throw new BadResponseError('response is not a PDF');
+        }
+        return buf;
+    });
+
+    await fs.writeFile(path.join(outputDir, `${contractId}.pdf`), pdfRes);
+}
+
+async function scrapeWindow(client, window, options, outputDir, stats, cachedIds) {
+    let page = 0;
+    let previousPageKey = '';
+
+    while (page < MAX_PAGES_PER_WINDOW) {
+        let ids = await fetchListPage(client, window, options, page);
+
+        if (ids.length === 0) {
+            // GeM sometimes returns a short or empty page mid-stream, so confirm the end
+            // by re-asking for this page and peeking at the next one.
+            await sleep(3000);
+            ids = await fetchListPage(client, window, options, page);
+            if (ids.length === 0) {
+                const next = await fetchListPage(client, window, options, page + 1);
+                if (next.length === 0) break;
+                console.warn(`  ! ${window.from}..${window.to} page ${page} was empty but page ${page + 1} was not - continuing`);
+                page++;
+                ids = next;
+            }
+        }
+
+        const pageKey = ids.join(',');
+        if (pageKey === previousPageKey) {
+            console.warn(`  ! Page ${page} repeated the previous page - stopping this window`);
+            break;
+        }
+        previousPageKey = pageKey;
+
+        const newIds = ids.filter((id) => !cachedIds.has(id));
+        stats.seen += ids.length;
+        stats.skipped += ids.length - newIds.length;
+
+        let pageDownloaded = 0;
+        for (const contractId of newIds) {
+            await sleep(options.throttleTime);
+            try {
+                await downloadContract(client, contractId, outputDir);
+                await fs.appendFile(CACHE_FILE, `${contractId}\n`);
+                cachedIds.add(contractId);
+                stats.downloaded++;
+                pageDownloaded++;
+            } catch (err) {
+                stats.failed++;
+                console.error(`  x ${contractId}: ${err.message}`);
+                await fs.appendFile(FAILED_CONTRACTS_FILE, `${contractId}\t${window.from}..${window.to}\t${err.message}\n`);
+            }
+        }
+
+        console.log(`[${window.from}..${window.to}] page ${page}: ${ids.length} contracts, ${pageDownloaded} downloaded, ${ids.length - newIds.length} cached | total DL ${stats.downloaded}, failed ${stats.failed}`);
+
+        page++;
+        await sleep(options.throttleTime);
+    }
+}
+
+export async function runExtraction() {
+    // Try using venv python, fallback to system python
+    const pythonCmd = await fs.pathExists('venv/Scripts/python.exe') ? 'venv\\Scripts\\python.exe' : 'python';
+
+    // stdio: 'inherit' shows the extractor's progress live and avoids exec's output buffer limit
+    await new Promise((resolve, reject) => {
+        const pyProcess = spawn(pythonCmd, ['gem_extract.py'], { stdio: 'inherit' });
+        pyProcess.on('close', (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(`Extraction process exited with code ${code}`));
+        });
+        pyProcess.on('error', reject);
+    });
+}
+
+export async function runScraper(answers) {
+    const { cookie, throttleTime, department, bno, buyer_category, repeatTillDate, windowDays } = answers;
+
+    const headers = {
+        'User-Agent': USER_AGENT,
+        'Accept': '*/*',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': BASE_URL,
+        'Referer': `${BASE_URL}/view_contracts`
+    };
+    // The public contract search doesn't need a login; a cookie is only sent if given.
+    if (cookie) headers.Cookie = cookie;
+
+    const client = axios.create({ baseURL: BASE_URL, timeout: REQUEST_TIMEOUT_MS, headers });
 
     // Setup Cache
     const cachedIds = new Set();
-    await fs.ensureDir(PDF_ROOT); // Ensure root exists
+    await fs.ensureDir(PDF_ROOT);
     if (await fs.pathExists(CACHE_FILE)) {
         const content = await fs.readFile(CACHE_FILE, 'utf-8');
         content.split('\n').map(l => l.trim()).filter(Boolean).forEach(id => cachedIds.add(id));
     }
     console.log(`Loaded ${cachedIds.size} cached contracts.`);
 
-    // Progress Bar
-    const stats = { scraped: 0, downloaded: 0, skipped: 0, failed: 0 };
-    const progressBar = new SingleBar({
-        format: 'Contract | {bar} | {value} Scraped | DL: {downloaded} | Speed: {speed}',
-        hideCursor: true
-    }, Presets.shades_classic);
-    progressBar.start(100, 0, { downloaded: 0, speed: 'N/A' });
-
-    // Processing Loop
     const today = new Date();
-    let done = false;
+    today.setHours(0, 0, 0, 0);
+    const from = parseDate(answers.fromDate);
+    let to = repeatTillDate ? today : parseDate(answers.toDate);
+    if (to > today) to = today;
 
-    while (!done) {
-        // Perform scrape for current range
-        await scrapeRange(
-            client,
-            currentFromStr,
-            currentToStr,
-            { throttleTime, department, bno, buyer_category },
-            stats,
-            cachedIds,
-            progressBar
-        );
+    const windows = buildWindows(from, to, windowDays);
+    const outputDir = path.join(PDF_ROOT, `${formatDate(from)}_to_${formatDate(to)}`);
+    await fs.ensureDir(outputDir);
+    console.log(`Scraping ${formatDate(from)} to ${formatDate(to)} in ${windows.length} window(s) of ${windowDays} day(s). Saving to: ${outputDir}`);
 
-        if (!repeatTillDate) {
-            done = true;
-        } else {
-            const lastEndDate = parseDate(currentToStr);
-            const nextStartDate = addDays(lastEndDate, 1);
+    const stats = { seen: 0, downloaded: 0, skipped: 0, failed: 0, failedWindows: 0 };
+    const options = { throttleTime, department, bno, buyer_category };
 
-            if (nextStartDate > today) {
-                done = true;
-                break;
-            }
-
-            let nextEndDate = addMonths(nextStartDate, 3);
-            nextEndDate = addDays(nextEndDate, -1);
-
-            if (nextEndDate > today) {
-                nextEndDate = today;
-            }
-
-            currentFromStr = formatDate(nextStartDate);
-            currentToStr = formatDate(nextEndDate);
-
-            if (nextStartDate > nextEndDate) {
-                done = true;
-            }
+    for (const window of windows) {
+        try {
+            await scrapeWindow(client, window, options, outputDir, stats, cachedIds);
+        } catch (err) {
+            // Retries exhausted: record the window so it can be re-run, and keep going.
+            stats.failedWindows++;
+            console.error(`\nWindow ${window.from}..${window.to} failed after retries: ${err.message}`);
+            await fs.appendFile(FAILED_RANGES_FILE, `${window.from}\t${window.to}\t${buyer_category}\t${err.message}\n`);
+            await sleep(60000);
         }
     }
 
-    progressBar.stop();
-    console.log('\nScraping completed. Starting data extraction...');
+    console.log('\nScraping completed.');
+    console.log('Stats:', stats);
+    if (stats.failed) console.log(`Failed contracts listed in ${FAILED_CONTRACTS_FILE} (re-running the same range retries them).`);
+    if (stats.failedWindows) console.log(`Incomplete date windows listed in ${FAILED_RANGES_FILE} - re-run those dates.`);
 
+    console.log('\nStarting data extraction...');
     try {
-        // Try using venv python, fallback to system python
-        const pythonCmd = await fs.pathExists('venv/Scripts/python.exe') ? 'venv\\Scripts\\python.exe' : 'python';
-        const { stdout, stderr } = await execAsync(`${pythonCmd} gem_extract.py`);
-        console.log(stdout);
-        if (stderr) console.error('Extraction Errors:', stderr);
+        await runExtraction();
     } catch (error) {
         console.error('Failed to run extraction script:', error.message);
     }
 
     console.log('\nAll done!');
-    console.log('Stats:', stats);
 }
