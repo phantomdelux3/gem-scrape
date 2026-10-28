@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import converter, db_report, downloads
@@ -30,7 +30,7 @@ from .scrape_engine import ALL_CATEGORIES, NUMBER_SOURCE, ScrapeConfig, ScrapeEn
 from .storage import Storage, data_dir
 
 APP_NAME = "GeM Contract Scraper"
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 DEVELOPER_NAME = "deadpool1555"
 SUPPORT_EMAIL = "phantomdeluxe.0555@gmail.com"
 OPTIONS_MAX_AGE = 24 * 3600
@@ -40,6 +40,14 @@ DB_LIVE_REFRESH = 15        # seconds between Database tab refreshes while scrap
 ANY_CATEGORY = "(any category)"
 ANY_STATUS = "(any status)"
 HISTORY_ANY = "(any)"
+
+# Windows display scaling (1.0 = 100 %, 1.5 = 150 % ...), set when the window opens. Fonts scale by
+# themselves; fixed pixel sizes (window, table columns, charts) go through px().
+UI_SCALE = 1.0
+
+
+def px(n):
+    return int(round(n * UI_SCALE))
 
 # Help tab: (heading, items). "Term: text" shows the term in bold; "NOTE text" is a grey note.
 HELP_SECTIONS = [
@@ -169,6 +177,73 @@ def open_path(path):
         messagebox.showerror(APP_NAME, f"Cannot open {path}:\n{e}")
 
 
+def keep_split(panes, fraction):
+    """Keep a two-pane Panedwindow's divider at `fraction` of its size whenever the window is resized
+    (the panes are laid out before the window has its final size, which can leave one pane squashed),
+    until the user drags the divider themselves."""
+    state = {"user": False}
+
+    def place(event=None):
+        if state["user"]:
+            return
+        size = panes.winfo_height() if str(panes.cget("orient")) == "vertical" else panes.winfo_width()
+        if size > 1:
+            panes.sashpos(0, int(size * fraction))
+
+    panes.bind("<Configure>", place, add="+")
+    panes.bind("<ButtonRelease-1>", lambda e: state.update(user=True), add="+")
+
+
+class TabScroller(ttk.Frame):
+    """A tab page whose content fills the tab like a normal frame, but gets scrollbars when the window is
+    smaller than the content (small screens, high Windows scaling). Build the page inside .inner."""
+
+    def __init__(self, parent, padding=6, min_width=880):
+        super().__init__(parent)
+        self.min_width = min_width
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.hbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=self.vbar.set, xscrollcommand=self.hbar.set)
+        self.inner = ttk.Frame(self.canvas, padding=padding)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self._last = None
+        self.canvas.bind("<Configure>", lambda e: self.relayout())
+
+    def relayout(self):
+        """Stretch the content to the visible area, or past it (with scrollbars) when the window is smaller
+        than the page needs. Cheap when nothing changed, so it can be called often."""
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        # wide tables shrink (they scroll sideways themselves) down to min_width (at 100 % scaling);
+        # None = the page always gets its full width. Heights are never squashed: the page scrolls.
+        rw = self.inner.winfo_reqwidth()
+        if self.min_width is not None:
+            rw = min(rw, px(self.min_width))
+        rh = self.inner.winfo_reqheight()
+        if cw <= 1 or (cw, ch, rw, rh) == self._last:
+            return
+        self._last = (cw, ch, rw, rh)
+        w, h = max(cw, rw), max(ch, rh)
+        self.canvas.itemconfigure(self._win, width=w, height=h)
+        self.canvas.configure(scrollregion=(0, 0, w, h))
+        for bar, needed, grid in ((self.vbar, rh > ch, {"row": 0, "column": 1, "sticky": "ns"}),
+                                  (self.hbar, rw > cw, {"row": 1, "column": 0, "sticky": "ew"})):
+            if needed and not bar.winfo_ismapped():
+                bar.grid(**grid)
+            elif not needed and bar.winfo_ismapped():
+                bar.grid_remove()
+        if rh <= ch:
+            self.canvas.yview_moveto(0)
+        if rw <= cw:
+            self.canvas.xview_moveto(0)
+
+    def can_scroll(self):
+        return self.vbar.winfo_ismapped()
+
+
 class ScrollFrame(ttk.Frame):
     """A vertically scrollable frame (for the column checkboxes)."""
 
@@ -183,11 +258,9 @@ class ScrollFrame(ttk.Frame):
         self.canvas.configure(yscrollcommand=bar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
 
-    def _wheel(self, event):
-        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+    def can_scroll(self):
+        return self.inner.winfo_reqheight() > self.canvas.winfo_height()
 
 
 class DownloadDialog(tk.Toplevel):
@@ -279,6 +352,9 @@ class DownloadDialog(tk.Toplevel):
         self.update_idletasks()
         x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 3)
+        # keep the dialog on the screen
+        x = max(0, min(x, self.winfo_screenwidth() - self.winfo_width()))
+        y = max(0, min(y, self.winfo_screenheight() - self.winfo_height() - 40))
         self.geometry(f"+{x}+{y}")
         try:
             self.wait_visibility()  # grab_set fails on a window that is not on screen yet
@@ -347,12 +423,11 @@ class ThrottleBar(ttk.Frame):
     red = HTTP 500/429 (throttled), purple = timeout, amber = slow, green = OK.
     The meter on the right shows how far the adaptive pace has slowed down from your base delay."""
 
-    HEIGHT = 46
-
     def __init__(self, parent):
         super().__init__(parent)
+        self.HEIGHT = px(46)
         self.info = tk.StringVar(value="Server throttling: waiting for requests ...")
-        ttk.Label(self, textvariable=self.info, style="Stat.TLabel", wraplength=480).pack(anchor="w")
+        ttk.Label(self, textvariable=self.info, style="Stat.TLabel", wraplength=px(480)).pack(anchor="w")
         legend = ttk.Frame(self)
         legend.pack(side="bottom", anchor="w")
         for kind, text in (("ok", "OK"), ("slow", "slow (8s+)"), ("throttled", "HTTP 500/429 - throttled"),
@@ -364,7 +439,7 @@ class ThrottleBar(ttk.Frame):
         self.canvas = tk.Canvas(body, height=self.HEIGHT, bg="#f7f7f7", highlightthickness=1,
                                 highlightbackground="#cccccc")
         self.canvas.pack(side="left", fill="x", expand=True)
-        self.meter = tk.Canvas(body, width=18, height=self.HEIGHT, bg="#f7f7f7", highlightthickness=1,
+        self.meter = tk.Canvas(body, width=px(18), height=self.HEIGHT, bg="#f7f7f7", highlightthickness=1,
                                highlightbackground="#cccccc")
         self.meter.pack(side="left", padx=(4, 0))
         self._version = -1
@@ -378,7 +453,7 @@ class ThrottleBar(ttk.Frame):
         c.delete("all")
         w = max(c.winfo_width(), 50)
         h = self.HEIGHT
-        step = 4
+        step = px(4)
         shown = events[-(w // step):]
         for i, (_, kind, secs, _) in enumerate(shown):
             x = w - (len(shown) - i) * step
@@ -392,7 +467,7 @@ class ThrottleBar(ttk.Frame):
         m = self.meter
         m.delete("all")
         fill = "#2e9d4f" if pressure < 0.25 else ("#e0a100" if pressure < 0.6 else "#d93025")
-        m.create_rectangle(2, h - max(3, h * pressure), 16, h, fill=fill, width=0)
+        m.create_rectangle(px(2), h - max(3, h * pressure), px(16), h, fill=fill, width=0)
         state = "calm" if pressure < 0.25 else ("slowing down" if pressure < 0.6 else "heavily throttled")
         self.info.set(f"Server: {state}  |  pace {pace:.1f}s/request (base {base:.1f}s)  |  "
                       f"500s/timeouts last 5 min: {bad}  |  total {throttled:,} of {total:,} requests")
@@ -406,7 +481,9 @@ class ThrottleBar(ttk.Frame):
 
 class App:
     def __init__(self, root):
+        global UI_SCALE
         self.root = root
+        UI_SCALE = min(4.0, max(1.0, root.winfo_fpixels("1i") / 96.0))
         self.data_dir = data_dir()
         self.db = Storage(self.data_dir / "gem_data.db")
         self.export_dir = self.data_dir / "exports"
@@ -436,19 +513,19 @@ class App:
         self.settings = self._load_settings()
 
         root.title(f"{APP_NAME} {APP_VERSION}")
-        root.geometry("1180x800")
-        root.minsize(900, 600)
+        self._fit_window()
         self._style()
 
         DeveloperBanner(root, DEVELOPER_NAME).pack(fill="x", side="top")
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
         self.nb = nb
-        self.tab_scrape = ttk.Frame(nb, padding=6)
-        self.tab_convert = ttk.Frame(nb, padding=6)
-        self.tab_db = ttk.Frame(nb, padding=6)
-        self.tab_history = ttk.Frame(nb, padding=6)
-        self.tab_help = ttk.Frame(nb, padding=12)
+        # every tab scrolls when the window is too small for it (small screens, 150-200 % scaling)
+        self.tab_scrape = TabScroller(nb, min_width=None)
+        self.tab_convert = TabScroller(nb)
+        self.tab_db = TabScroller(nb)
+        self.tab_history = TabScroller(nb)
+        self.tab_help = TabScroller(nb, padding=12)
         nb.add(self.tab_scrape, text="  1. Scrape contracts  ")
         nb.add(self.tab_convert, text="  2. Convert PDFs  ")
         nb.add(self.tab_db, text="  3. Database & search  ")
@@ -464,10 +541,50 @@ class App:
         self._apply_settings()
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+        root.bind_all("<MouseWheel>", self._on_wheel, add="+")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.report_callback_exception = self._report_error  # button / event errors too
         root.after(150, self._poll)
         root.after(300, self._load_options)
+
+    # ------------------------------------------------------------------ screen
+    def _fit_window(self):
+        """Open at a comfortable size for this screen and scaling; maximised when the screen is small."""
+        root = self.root
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        want_w, want_h = px(1180), px(870)
+        w, h = min(want_w, int(sw * 0.95)), min(want_h, int(sh * 0.88))  # leave room for the taskbar
+        root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+        root.minsize(min(px(640), w), min(px(420), h))
+        if want_w > sw * 0.95 or want_h > sh * 0.88:
+            try:
+                root.state("zoomed")
+            except tk.TclError:
+                pass
+
+    def _on_wheel(self, event):
+        """Mouse wheel scrolls the scrollable area under the pointer. Lists, tables and text boxes scroll
+        themselves; everything else scrolls the nearest scrollable frame (or the tab page)."""
+        w = event.widget
+        if isinstance(w, str):  # e.g. the drop-down list of a combobox
+            return
+        try:
+            if w.winfo_class() in ("Text", "Listbox", "Treeview", "TCombobox", "TSpinbox", "Spinbox"):
+                return
+        except tk.TclError:
+            return
+        steps = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+        while w is not None:
+            if isinstance(w, (ScrollFrame, TabScroller)) and w.can_scroll():
+                w.canvas.yview_scroll(steps, "units")
+                return
+            w = w.master
+
+    def _relayout_tabs(self):
+        try:
+            self.root.nametowidget(self.nb.select()).relayout()
+        except (KeyError, tk.TclError, AttributeError):
+            pass
 
     # ------------------------------------------------------------------ style
     def _style(self):
@@ -482,7 +599,8 @@ class App:
         style.configure("StatV.TLabel", font=("Consolas", 10, "bold"))
         style.configure("Hint.TLabel", foreground="#555555")
         style.configure("Tile.TLabel", font=("Segoe UI", 15, "bold"))
-        style.configure("Treeview", rowheight=22)
+        line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        style.configure("Treeview", rowheight=max(px(22), line + px(6)))
         self.root.option_add("*Font", ("Segoe UI", 9))
 
     # ------------------------------------------------------------ status bar
@@ -496,7 +614,7 @@ class App:
 
     # ------------------------------------------------------------ scrape tab
     def _build_scrape_tab(self):
-        t = self.tab_scrape
+        t = self.tab_scrape.inner
         t.columnconfigure(0, weight=3)
         t.columnconfigure(1, weight=2)
         t.rowconfigure(1, weight=1)
@@ -579,7 +697,7 @@ class App:
                      values=["Auto", "1", "3", "7", "15", "30", "60", "90"]).grid(row=2, column=1, padx=4, sticky="w")
         ttk.Label(opts, text="The delay adapts automatically: it slows down when GeM answers with HTTP 500 and "
                              "speeds back up to the base delay when requests succeed.",
-                  style="Hint.TLabel", wraplength=420).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+                  style="Hint.TLabel", wraplength=px(420)).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # --- controls
         ctl = ttk.Frame(right)
@@ -619,12 +737,12 @@ class App:
             r, c = i % half, (i // half) * 2
             ttk.Label(stats, text=title, style="Stat.TLabel").grid(row=r, column=c, sticky="w", padx=(0, 6))
             var = tk.StringVar(value="-")
-            ttk.Label(stats, textvariable=var, style="StatV.TLabel", wraplength=170).grid(
+            ttk.Label(stats, textvariable=var, style="StatV.TLabel", wraplength=px(170)).grid(
                 row=r, column=c + 1, sticky="w", padx=(0, 10))
             self.sc_stats[key] = var
         ttk.Label(prog, text="Current search", style="Stat.TLabel").pack(anchor="w", pady=(6, 0))
         self.sc_current = tk.StringVar(value="-")
-        ttk.Label(prog, textvariable=self.sc_current, style="StatV.TLabel", wraplength=420).pack(anchor="w")
+        ttk.Label(prog, textvariable=self.sc_current, style="StatV.TLabel", wraplength=px(420)).pack(anchor="w")
 
         # --- log
         logf = ttk.LabelFrame(t, text="Activity log", padding=4)
@@ -804,8 +922,17 @@ class App:
             except Exception as e:  # noqa: BLE001
                 depts = []
                 self.msgq.put(("log", f"Could not load departments: {e}"))
-            self.msgq.put(("call", lambda: self.min_boxes["Department"].configure(values=[""] + depts)))
+            self.msgq.put(("call", lambda: self._set_departments(ministry, state, depts)))
         threading.Thread(target=work, daemon=True).start()
+
+    def _set_departments(self, ministry, state, depts):
+        # ignore a slow answer for a ministry/state the user has since changed
+        if (self.min_var.get(), self.state_var.get()) == (ministry, state):
+            self.min_boxes["Department"].configure(values=[""] + depts)
+
+    def _set_organizations(self, dept, orgs):
+        if self.dept_var.get() == dept:
+            self.min_boxes["Organization"].configure(values=[""] + orgs)
 
     def _load_orgs(self):
         dept = self.dept_var.get()
@@ -821,7 +948,7 @@ class App:
             except Exception as e:  # noqa: BLE001
                 orgs = []
                 self.msgq.put(("log", f"Could not load organizations: {e}"))
-            self.msgq.put(("call", lambda: self.min_boxes["Organization"].configure(values=[""] + orgs)))
+            self.msgq.put(("call", lambda: self._set_organizations(dept, orgs)))
         threading.Thread(target=work, daemon=True).start()
 
     # --------------------------------------------------------- search options
@@ -962,7 +1089,7 @@ class App:
         self.sc_pct.set("")
 
     def _pause_scrape(self):
-        if self.engine:
+        if self.engine and self.engine.is_running() and not self.engine.stop_event.is_set():
             paused = self.engine.toggle_pause()
             self.btn_pause.configure(text="Resume" if paused else "Pause")
             self._log(self.sc_log, "Paused." if paused else "Resumed.")
@@ -995,12 +1122,13 @@ class App:
     def _show_failures(self):
         win = tk.Toplevel(self.root)
         win.title("Failures")
-        win.geometry("900x420")
+        win.geometry(f"{min(px(900), int(win.winfo_screenwidth() * 0.95))}x"
+                     f"{min(px(420), int(win.winfo_screenheight() * 0.8))}")
         tree = ttk.Treeview(win, columns=("at", "kind", "ref", "detail"), show="headings")
         for col, title, width in (("at", "Time", 140), ("kind", "Type", 70), ("ref", "Contract / search", 260),
                                   ("detail", "Error", 420)):
             tree.heading(col, text=title)
-            tree.column(col, width=width, anchor="w")
+            tree.column(col, width=px(width), anchor="w")
         sb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
         bottom = ttk.Frame(win, padding=6)
@@ -1103,7 +1231,7 @@ class App:
 
     # ------------------------------------------------------------ convert tab
     def _build_convert_tab(self):
-        t = self.tab_convert
+        t = self.tab_convert.inner
         t.columnconfigure(0, weight=1)
         t.rowconfigure(1, weight=1)
 
@@ -1345,7 +1473,7 @@ class App:
         tree = ttk.Treeview(frame, columns=[c[0] for c in columns], show="headings", height=height)
         for key, title, width, anchor in columns:
             tree.heading(key, text=title, command=lambda k=key: self._sort_tree(tree, k))
-            tree.column(key, width=width, minwidth=40, anchor=anchor, stretch=anchor == "w")
+            tree.column(key, width=px(width), minwidth=px(40), anchor=anchor, stretch=anchor == "w")
         ys = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         xs = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -1367,7 +1495,7 @@ class App:
 
     # ---------------------------------------------------------- database tab
     def _build_db_tab(self):
-        t = self.tab_db
+        t = self.tab_db.inner
         t.columnconfigure(0, weight=1)
         t.rowconfigure(1, weight=1)
 
@@ -1390,7 +1518,7 @@ class App:
         info = ttk.Frame(top)
         info.pack(fill="x", pady=(6, 0))
         self.db_dupe_info = tk.StringVar(value="")
-        ttk.Label(info, textvariable=self.db_dupe_info, style="Hint.TLabel", wraplength=900).pack(side="left")
+        ttk.Label(info, textvariable=self.db_dupe_info, style="Hint.TLabel", wraplength=px(900)).pack(side="left")
         ttk.Button(info, text="Refresh", command=self._db_refresh).pack(side="right")
         self.db_status = tk.StringVar(value="Open this tab to load the database.")
         ttk.Label(info, textvariable=self.db_status, style="Hint.TLabel").pack(side="right", padx=8)
@@ -1432,6 +1560,7 @@ class App:
         # --- search
         srch = ttk.LabelFrame(panes, text="Search the database", padding=6)
         panes.add(srch, weight=2)
+        keep_split(panes, 1 / 3)
         f1 = ttk.Frame(srch)
         f1.pack(fill="x")
         ttk.Label(f1, text="Search").pack(side="left")
@@ -1492,9 +1621,10 @@ class App:
         ttk.Label(srch, text="Download the search results or the whole database as Excel or CSV - one row per "
                             "contract or full details (every sheet), all or chosen categories, optionally split "
                             "by category. Each contract appears once.",
-                  style="Hint.TLabel", wraplength=1000).pack(anchor="w", pady=(2, 0))
+                  style="Hint.TLabel", wraplength=px(1000)).pack(anchor="w", pady=(2, 0))
 
     def _on_tab_changed(self, event=None):
+        self.root.after_idle(self._relayout_tabs)
         current = self.nb.select()
         if current == str(self.tab_db) and (self._db_stale or self.db_rows is None):
             self._db_refresh()
@@ -1778,7 +1908,7 @@ class App:
 
     # ----------------------------------------------------------- history tab
     def _build_history_tab(self):
-        t = self.tab_history
+        t = self.tab_history.inner
         t.columnconfigure(0, weight=1)
         t.rowconfigure(1, weight=1)
         flt = ttk.LabelFrame(t, text="Filters", padding=6)
@@ -1855,6 +1985,7 @@ class App:
 
         det = ttk.LabelFrame(panes, text="Details", padding=6)
         panes.add(det, weight=1)
+        keep_split(panes, 3 / 4)
         btns = ttk.Frame(det)
         btns.pack(fill="x")
         ttk.Button(btns, text="Show / download its contracts", command=self._history_show_contracts
@@ -2144,7 +2275,7 @@ class App:
 
     # ---------------------------------------------------------------- help
     def _build_help_tab(self):
-        t = self.tab_help
+        t = self.tab_help.inner
         t.columnconfigure(0, weight=1)
         t.rowconfigure(1, weight=1)
         head = ttk.Frame(t)
@@ -2205,7 +2336,7 @@ class App:
         mail.bind("<Button-1>", lambda e: self._email_support())
         ttk.Button(support, text="Copy email address", command=self._copy_support_email).pack(anchor="w", pady=(4, 6))
         ttk.Label(support, text=f"{APP_NAME} is developed by {DEVELOPER_NAME}.", style="Hint.TLabel",
-                  wraplength=230).pack(anchor="w")
+                  wraplength=px(230)).pack(anchor="w")
         ttk.Label(support, text=f"Version {APP_VERSION}", style="Hint.TLabel").pack(anchor="w")
 
     def _email_support(self):
@@ -2255,6 +2386,7 @@ class App:
             now = time.time()
             if now - getattr(self, "_last_stats", 0) > 0.5:
                 self._last_stats = now
+                self._relayout_tabs()  # content can grow (e.g. another search mode): update the scrollbars
                 if self.engine and self.engine.is_running():
                     self._update_scrape_stats()
                     self._db_stale = True
@@ -2369,16 +2501,28 @@ class App:
         if self.convert_cancel:
             self.convert_cancel.set()
         self._save_settings()
+        if busy:
+            # give the jobs a few seconds to wind down, so History shows "Stopped" and the PDFs being
+            # read are saved; a request still waiting on GeM is abandoned
+            self.root.configure(cursor="watch")
+            self.root.update()
+            for t in (self.engine and self.engine.thread, self.convert_thread):
+                if t is not None:
+                    t.join(timeout=5)
         self.root.destroy()
 
 
 def main():
     if sys.platform == "win32":
+        # sharp text at any Windows scaling (125 %, 150 %, 200 % ...); the layout scales itself from the DPI
+        import ctypes
         try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on high-DPI screens
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except (AttributeError, OSError):
-            pass
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()  # Windows 7 / 8.0
+            except (AttributeError, OSError):
+                pass
     root = tk.Tk()
     App(root)
     root.mainloop()

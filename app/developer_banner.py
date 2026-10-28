@@ -45,11 +45,15 @@ def _gradient(u):
 
 class DeveloperBanner(tk.Canvas):
     def __init__(self, parent, name, caption="Developer:"):
-        super().__init__(parent, height=HEIGHT, highlightthickness=0, borderwidth=0, background=BG_BOTTOM)
+        caption_font = tkfont.Font(family="Segoe UI", size=10)
+        name_font = tkfont.Font(family="Segoe UI", size=12, weight="bold")
+        # grows with Windows display scaling, like the fonts do
+        self.height = max(HEIGHT, int(name_font.metrics("linespace") * 1.75))
+        super().__init__(parent, height=self.height, highlightthickness=0, borderwidth=0, background=BG_BOTTOM)
         self.name = name
         self.caption = caption
-        self.caption_font = tkfont.Font(family="Segoe UI", size=10)
-        self.name_font = tkfont.Font(family="Segoe UI", size=12, weight="bold")
+        self.caption_font = caption_font
+        self.name_font = name_font
         self._chars = []          # (canvas id, centre as a fraction of the name width)
         self._sparkles = []
         self._region = (0, 0, 1, 1)
@@ -60,20 +64,20 @@ class DeveloperBanner(tk.Canvas):
         self._job = self.after(FRAME_MS, self._tick)
 
     def _bg_at(self, y):
-        return _mix(BG_BOTTOM, BG_TOP, min(1.0, max(0.0, y / HEIGHT)))
+        return _mix(BG_BOTTOM, BG_TOP, min(1.0, max(0.0, y / self.height)))
 
     # ----- static drawing (on resize) -----------------------------------------
     def _layout(self):
         self.delete("all")
         w = max(self.winfo_width(), 1)
-        for y in range(HEIGHT):  # vertical background gradient
+        for y in range(self.height):  # vertical background gradient
             self.create_line(0, y, w, y, fill=self._bg_at(y))
 
         gap = 6
         cap_w = self.caption_font.measure(self.caption)
         name_w = max(self.name_font.measure(self.name), 1)
         x0 = (w - (cap_w + gap + name_w)) / 2
-        cy = HEIGHT / 2
+        cy = self.height / 2
         self.create_text(x0, cy, text=self.caption, anchor="w", font=self.caption_font, fill=CAPTION_COLOR)
 
         nx = x0 + cap_w + gap
@@ -107,7 +111,7 @@ class DeveloperBanner(tk.Canvas):
     def _respawn(self, s, now):
         x1, y1, x2, y2 = self._region
         r = random.uniform(*SPARKLE_RADIUS)
-        y = min(max(random.uniform(y1, y2), r), HEIGHT - r)  # keep the whole star inside the banner
+        y = min(max(random.uniform(y1, y2), r), self.height - r)  # keep the whole star inside the banner
         s.update(x=random.uniform(x1, x2), y=y, r=r, period=random.uniform(*SPARKLE_PERIOD), born=now)
 
     # ----- animation ------------------------------------------------------------

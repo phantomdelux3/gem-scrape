@@ -3,7 +3,7 @@
 ; Self-contained: Python and all libraries are bundled, nothing else needs to be installed.
 
 #define AppName "GeM Scraper"
-#define AppVersion "3.0"
+#define AppVersion "3.1"
 #define AppExe "GeM Scraper.exe"
 
 [Setup]
@@ -35,7 +35,8 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; the complete app folder: the .exe plus its _internal folder (Python runtime + libraries)
-Source: "..\dist\GeM Scraper\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; (never a "GeM Data" folder: a test run of the built app would create one, with that PC's data in it)
+Source: "..\dist\GeM Scraper\*"; DestDir: "{app}"; Excludes: "GeM Data,GeM Data\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
 ; data folder (PDFs, gem_data.db, exports) - kept when the app is uninstalled

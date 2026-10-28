@@ -227,19 +227,27 @@ class Storage:
         self._exec("INSERT OR REPLACE INTO pdfs(contract_no, path, size, downloaded_at) VALUES (?,?,?,?)",
                    (contract_no, str(path), size, time.time()))
 
-    def add_pdfs(self, rows):
-        self._exec("INSERT OR IGNORE INTO pdfs(contract_no, path, size, downloaded_at) VALUES (?,?,?,?)",
+    def add_pdfs(self, rows, replace=False):
+        self._exec(f"INSERT OR {'REPLACE' if replace else 'IGNORE'} INTO pdfs(contract_no, path, size, downloaded_at) "
+                   "VALUES (?,?,?,?)",
                    [(no, str(p), size, time.time()) for no, p, size in rows], many=True)
 
     def downloaded_ids(self):
         return {r[0] for r in self._query("SELECT contract_no FROM pdfs")}
+
+    def pdf_paths(self):
+        return dict(self._query("SELECT contract_no, path FROM pdfs"))
+
+    def remove_pdfs(self, contract_nos):
+        """Forget PDFs that are no longer on disk."""
+        self._exec("DELETE FROM pdfs WHERE contract_no=?", [(no,) for no in contract_nos], many=True)
 
     def pdf_count(self):
         return self._query("SELECT COUNT(*) FROM pdfs")[0][0]
 
     # ----- parsed PDF data (parse cache) ------------------------------------
     def parsed_sigs(self, version):
-        return {p: s for p, s in self._query("SELECT path, sig FROM parsed WHERE version=?", (version,))}
+        return {p: s for p, s in self._query("SELECT path, sig FROM parsed WHERE version=? AND error IS NULL", (version,))}
 
     def save_parsed(self, rows, version):
         """rows: [(path, sig, data or None, error or None)]"""

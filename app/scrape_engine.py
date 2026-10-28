@@ -146,6 +146,8 @@ class ScrapeStats:
         self.finished = None
         self.status = "Starting"
         self.current = ""
+        self.paused_total = 0.0   # seconds spent paused - not counted in elapsed time / ETA
+        self.paused_at = None
         for f in self.FIELDS:
             setattr(self, f, 0)
 
@@ -162,8 +164,18 @@ class ScrapeStats:
     def snapshot(self):
         with self.lock:
             d = {k: v for k, v in self.__dict__.items() if k != "lock"}
-        d["elapsed"] = (d["finished"] or time.time()) - d["started"]
+        end = d["finished"] or time.time()
+        paused = d["paused_total"] + (end - d["paused_at"] if d["paused_at"] else 0)
+        d["elapsed"] = max(0.0, end - d["started"] - paused)
         return d
+
+    def pause(self, on):
+        with self.lock:
+            if on and self.paused_at is None:
+                self.paused_at = time.time()
+            elif not on and self.paused_at is not None:
+                self.paused_total += time.time() - self.paused_at
+                self.paused_at = None
 
 
 class ScrapeEngine:
@@ -198,13 +210,20 @@ class ScrapeEngine:
     def stop(self):
         self.stop_event.set()
         self.pause_event.clear()
+        self.stats.pause(False)
+        if self.is_running():
+            self.stats.status = "Stopping"
 
     def toggle_pause(self):
+        if self.stop_event.is_set() or not self.is_running():
+            return self.pause_event.is_set()
         if self.pause_event.is_set():
             self.pause_event.clear()
+            self.stats.pause(False)
             self.stats.status = "Running"
         else:
             self.pause_event.set()
+            self.stats.pause(True)
             self.stats.status = "Paused"
         return self.pause_event.is_set()
 
@@ -217,7 +236,8 @@ class ScrapeEngine:
             self.have = self._sync_existing_pdfs()
             if cfg.download_pdfs and cfg.read_while_scraping:
                 self.reader = ParsePool(self.db, cfg.read_workers)
-            if not self.pause_event.is_set():  # keep "Paused" if the user paused during the PDF check
+            # keep "Paused" / "Stopping" if the user pressed a button during the PDF check
+            if not (self.pause_event.is_set() or self.stop_event.is_set()):
                 self.stats.status = "Running"
             self.log(f"{len(self.have):,} PDF(s) already downloaded - they will be skipped.")
 
@@ -267,6 +287,7 @@ class ScrapeEngine:
         finally:
             if self.reader:
                 self.reader.close()
+            self.stats.pause(False)
             self.stats.finished = time.time()
             if self.run_id:
                 s = self.stats.snapshot()
@@ -338,11 +359,17 @@ class ScrapeEngine:
             self.db.add_failure("PDF", cid, e)
             return
         folder = self.pdf_dir / self._month_folder(card)
-        folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{cid}.pdf"
         tmp = folder / f"{cid}.pdf.part"
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        except OSError as e:  # disk full, folder not writable, file locked by antivirus ...
+            self.stats.add(failed=1)
+            self.log(f"  x {cid}: could not save the PDF ({e})")
+            self.db.add_failure("PDF", cid, f"could not save: {e}")
+            return
         self.db.add_pdf(cid, path, len(data))
         self.have.add(cid)
         self.stats.add(downloaded=1, bytes=len(data), download_seconds=time.time() - t0)
@@ -388,9 +415,10 @@ class ScrapeEngine:
             return "unknown-date"
 
     def _sync_existing_pdfs(self):
-        """IDs already downloaded: from the database, plus any PDFs in the folder it doesn't know yet."""
-        have = self.db.downloaded_ids()
-        found = []
+        """IDs already downloaded: PDFs the database knows that are still on disk, plus any PDFs in the
+        folder it doesn't know yet. PDFs deleted by hand are forgotten, so they are downloaded again."""
+        known = self.db.pdf_paths()
+        on_disk = {}
         stack = [str(self.pdf_dir)]
         while stack:
             d = stack.pop()
@@ -400,11 +428,27 @@ class ScrapeEngine:
                         if e.is_dir(follow_symlinks=False):
                             stack.append(e.path)
                         elif e.name.lower().endswith(".pdf"):
-                            cid = e.name[:-4]
-                            if cid not in have and e.stat().st_size > 1000:
-                                found.append((cid, e.path, e.stat().st_size))
+                            size = e.stat().st_size
+                            if size > 1000:
+                                on_disk[e.name[:-4]] = (e.path, size)
             except OSError:
                 pass
+        have = set()
+        gone, moved = [], []
+        for cid, path in known.items():
+            if os.path.exists(path):
+                have.add(cid)
+            elif cid in on_disk:  # file moved inside the PDF folder: remember the new place
+                moved.append((cid, *on_disk[cid]))
+            else:
+                gone.append(cid)
+        found = [(cid, path, size) for cid, (path, size) in on_disk.items() if cid not in known]
+        if moved:
+            self.db.add_pdfs(moved, replace=True)
+            have.update(cid for cid, _, _ in moved)
+        if gone:
+            self.db.remove_pdfs(gone)
+            self.log(f"{len(gone):,} PDF(s) in the database are no longer on disk - they will be downloaded again.")
         if found:
             self.db.add_pdfs(found)
             have.update(cid for cid, _, _ in found)

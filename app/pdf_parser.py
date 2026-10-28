@@ -14,8 +14,35 @@ import re
 import unicodedata
 
 import pdfplumber
+import pdfplumber.page
+from pdfminer.psparser import PSLiteral
 
 PARSER_VERSION = 12  # bump to invalidate cached parse results after parser changes
+
+
+# ---------- tolerant colours ----------
+# Some PDFs set colours in malformed ways (e.g. "#bf-tr-ff-rt sc", strings, empty operands).
+# pdfplumber then crashes ("tuple index out of range"). The parser never uses colours, so
+# accept any format: keep numeric components and a pattern name if present, never raise.
+def _safe_normalize_color(color):
+    try:
+        if color is None:
+            return None, None
+        parts = list(color) if isinstance(color, (tuple, list)) else [color]
+        pattern = None
+        if parts and isinstance(parts[-1], (PSLiteral, str, bytes)):
+            name = parts.pop()
+            name = getattr(name, "name", name)
+            if isinstance(name, bytes):
+                name = name.decode("latin-1", "replace")
+            pattern = str(name) or None
+        nums = tuple(p for p in parts if isinstance(p, (int, float)) and not isinstance(p, bool))
+        return (nums or None), pattern
+    except Exception:  # noqa: BLE001 - a bad colour must never fail a PDF
+        return None, None
+
+
+pdfplumber.page.normalize_color = _safe_normalize_color
 
 # ---------- text helpers ----------
 CID_RE = re.compile(r"\(cid:\d+\)")
